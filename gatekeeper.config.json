@@ -1,0 +1,60 @@
+{
+  "server": {
+    "port": 8000,
+    "adminPort": 8080,
+    "host": "0.0.0.0",
+    "timeoutMs": 30000
+  },
+  "routes": [
+    {
+      "pathPrefix": "/api/v1",
+      "targets": [
+        "http://127.0.0.1:9001",
+        "http://127.0.0.1:9002"
+      ],
+      "balanceStrategy": "round-robin",
+      "healthCheckPath": "/health",
+      "rateLimit": {
+        "windowMs": 60000,
+        "maxRequests": 100
+      }
+    },
+    {
+      "pathPrefix": "/auth",
+      "targets": [
+        "http://127.0.0.1:9003"
+      ],
+      "rateLimit": {
+        "windowMs": 60000,
+        "maxRequests": 10
+      }
+    }
+  ],
+  "firewall": {
+    "enabled": true,
+    "ipBlacklist": [
+      "10.0.0.66"
+    ],
+    "ipWhitelist": [],
+    "blockedUserAgents": [
+      "sqlmap",
+      "nikto",
+      "masscan",
+      "python-requests/threat-bot"
+    ],
+    "wafRules": {
+      "blockSqlInjection": true,
+      "blockXss": true,
+      "blockPathTraversal": true
+    },
+    "customBlockedPaths": [
+      "^/\\.env.*",
+      "^/\\.git.*",
+      "^/wp-login\\.php"
+    ]
+  },
+  "rateLimiter": {
+    "globalWindowMs": 60000,
+    "globalMaxRequests": 300
+  }
+}
