@@ -2,19 +2,17 @@
 
 Gatekeeper Proxy es un prototipo en TypeScript/Node.js de un proxy HTTP configurable. El código incluye reglas de firewall, limitación de solicitudes y una pequeña interfaz de administración.
 
+```bash
+git clone https://github.com/tatitoxt/gatekeeper-proxy.git && cd gatekeeper-proxy
+npm install && npm run dev
+```
+
 ## Requisitos
 
 - Node.js 22+
 - npm
 
 ## Ejecutar localmente
-
-```bash
-git clone https://github.com/tatitoxt/gatekeeper-proxy.git
-cd gatekeeper-proxy
-npm install
-npm run dev
-```
 
 Para compilar y ejecutar la versión compilada:
 
