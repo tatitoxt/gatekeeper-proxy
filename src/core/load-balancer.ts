@@ -53,7 +53,10 @@ export class LoadBalancer {
       const existing = this.routes.get(route.pathPrefix);
       const targets = route.targets.map((url) => {
         const found = existing?.targets.find((t) => t.url === url);
-        return found ?? { url, isHealthy: true, activeConnections: 0 };
+        if (!found) return { url, isHealthy: true, activeConnections: 0 };
+        // Without health checks nothing would ever mark a target healthy again.
+        if (!route.healthCheckPath) found.isHealthy = true;
+        return found;
       });
       next.set(route.pathPrefix, { route, targets, nextIndex: existing?.nextIndex ?? 0 });
     }

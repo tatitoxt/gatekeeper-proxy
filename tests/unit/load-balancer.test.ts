@@ -59,6 +59,16 @@ describe('LoadBalancer', () => {
     expect(lb.getTargetStates('/old')).toEqual([]);
   });
 
+  test('removing healthCheckPath puts previously failed targets back in rotation', () => {
+    const r = route({ targets: ['http://a:1'], healthCheckPath: '/health' });
+    const lb = new LoadBalancer([r]);
+    lb.reportFailure('/api', 'http://a:1');
+    expect(lb.selectTarget(r)).toBeNull();
+    const withoutChecks = route({ targets: ['http://a:1'] });
+    lb.updateRoutes([withoutChecks]);
+    expect(lb.selectTarget(withoutChecks)).toBe('http://a:1');
+  });
+
   describe('active health checks against real HTTP servers', () => {
     let healthy: Upstream;
     let failing: Upstream;
