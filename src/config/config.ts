@@ -60,6 +60,13 @@ export interface GatekeeperConfig {
   healthCheck: HealthCheckConfig;
 }
 
+export class ConfigPersistError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConfigPersistError';
+  }
+}
+
 export class ConfigValidationError extends Error {
   constructor(public readonly issues: string[]) {
     super(`Invalid Gatekeeper configuration:\n  - ${issues.join('\n  - ')}`);
@@ -183,7 +190,9 @@ export function validateConfig(raw: unknown): GatekeeperConfig {
         return;
       }
       const pathPrefix = str(r, 'pathPrefix', where, '');
-      if (pathPrefix && !pathPrefix.startsWith('/')) {
+      if (!pathPrefix) {
+        issues.push(`${where}.pathPrefix is required (use "/" for a catch-all route)`);
+      } else if (!pathPrefix.startsWith('/')) {
         issues.push(`${where}.pathPrefix must start with "/"`);
       }
       if (seen.has(pathPrefix)) issues.push(`${where}.pathPrefix "${pathPrefix}" is duplicated`);
@@ -310,8 +319,9 @@ export class ConfigManager {
   /** Validates and applies a partial update, then persists it to disk. Throws ConfigValidationError. */
   public updateConfig(patch: Partial<GatekeeperConfig>): void {
     const next = validateConfig({ ...this.currentConfig, ...patch });
+    // Persist first: an edit that cannot be saved must fail instead of silently vanishing on restart.
+    this.writeConfig(next);
     this.currentConfig = next;
-    this.saveConfig();
     this.notifyListeners();
   }
 
@@ -366,14 +376,15 @@ export class ConfigManager {
     return config;
   }
 
-  private saveConfig(): void {
-    const raw = JSON.stringify(this.currentConfig, null, 2) + '\n';
+  private writeConfig(config: GatekeeperConfig): void {
+    const raw = JSON.stringify(config, null, 2) + '\n';
     try {
       fs.writeFileSync(this.configPath, raw, 'utf-8');
-      this.lastRaw = raw;
     } catch (err) {
       logger.error({ err, path: this.configPath }, 'Failed to persist configuration to disk');
+      throw new ConfigPersistError(`Could not write config file ${this.configPath}: ${(err as Error).message}`);
     }
+    this.lastRaw = raw;
   }
 
   private watchConfigFile(intervalMs: number): void {

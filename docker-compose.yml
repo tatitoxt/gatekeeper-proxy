@@ -20,6 +20,7 @@ services:
       GATEKEEPER_CONFIG: /app/config/gatekeeper.config.json
       GATEKEEPER_ADMIN_TOKEN: ${GATEKEEPER_ADMIN_TOKEN:?Set GATEKEEPER_ADMIN_TOKEN to protect the admin API}
     volumes:
-      # Writable: blacklist changes made through the admin API are persisted here.
+      # Must be writable by the container's `node` user (UID 1000): blacklist changes made through the
+      # admin API are persisted here, and the API returns 500 without applying a change it cannot save.
       - ./examples/docker.config.json:/app/config/gatekeeper.config.json
     restart: unless-stopped

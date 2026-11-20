@@ -79,6 +79,8 @@ GATEKEEPER_ADMIN_TOKEN=change-me docker compose up --build
 
 This starts the synthetic upstreams and the gateway with [`examples/docker.config.json`](examples/docker.config.json).
 The proxy is published on `:8000`; the admin port on `127.0.0.1:8080` only. The same `curl` commands work.
+The bind-mounted config must be writable by UID 1000 (the image's `node` user) for blocklist edits to persist;
+if it is not, the admin API returns `500` and does not apply the change.
 
 ## Configuration
 
@@ -155,7 +157,7 @@ npm run check          # everything above
 - **Integration** (`tests/integration`): an in-process `ProxyServer` / `AdminServer` on real sockets against local upstream servers — forwarding, headers, WAF, 429s, 502/504, failover, admin auth and validation.
 - **E2E** (`e2e/`): starts the compiled CLI and the synthetic upstreams as child processes with a temp config and random ports, then uses plain HTTP: routing, firewall, rate limiting, admin blocklist on live traffic, config hot reload (valid and invalid edits), health-check failover, startup failure on bad config, graceful SIGTERM. A Playwright test drives the dashboard in Chromium, including a check that an XSS payload from a blocked request is rendered as text.
 
-Measured in this repository (Node 22, Linux): 138 Jest unit/integration tests, 17 process-level E2E tests and 1 Playwright
+Measured in this repository (Node 22, Linux): 143 Jest unit/integration tests, 17 process-level E2E tests and 1 Playwright
 test pass; `npm run test:coverage` reports ~94% statement coverage of `src/` (excluding `src/index.ts`, which the E2E suite covers).
 CI runs the unit/integration job on Node 20 and 22, the E2E job, `npm audit --audit-level=high`, and a Docker Compose smoke test.
 

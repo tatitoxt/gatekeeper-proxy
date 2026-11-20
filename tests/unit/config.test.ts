@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ConfigManager, ConfigValidationError, defaultConfig, validateConfig } from '../../src/config/config.js';
+import { ConfigManager, ConfigPersistError, ConfigValidationError, defaultConfig, validateConfig } from '../../src/config/config.js';
 
 const tmpFile = (content: string | object) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gatekeeper-config-'));
@@ -44,6 +44,7 @@ describe('validateConfig', () => {
     [{ server: { trustProxy: 'yes' } }, 'server.trustProxy must be a boolean'],
     [{ routes: {} }, 'routes must be an array'],
     [{ routes: [{ pathPrefix: 'api', targets: ['http://127.0.0.1:1'] }] }, 'must start with "/"'],
+    [{ routes: [{ targets: ['http://127.0.0.1:1'] }] }, 'pathPrefix is required'],
     [{ routes: [{ pathPrefix: '/api', targets: [] }] }, 'at least one URL'],
     [{ routes: [{ pathPrefix: '/api', targets: ['not a url'] }] }, 'not a valid URL'],
     [{ routes: [{ pathPrefix: '/api', targets: ['https://example.com'] }] }, 'must use http://'],
@@ -130,6 +131,22 @@ describe('ConfigManager', () => {
       ConfigValidationError
     );
     expect(manager.getConfig().firewall.ipBlacklist).toEqual(['198.51.100.0/24']);
+  });
+
+  test('updateConfig fails without applying anything when the file cannot be written', () => {
+    const file = tmpFile({});
+    const manager = new ConfigManager(file, { watch: false });
+    const listener = jest.fn();
+    manager.onChange(listener);
+    fs.chmodSync(file, 0o444);
+    try {
+      const firewall = { ...manager.getConfig().firewall, ipBlacklist: ['198.51.100.7'] };
+      expect(() => manager.updateConfig({ firewall })).toThrow(ConfigPersistError);
+      expect(manager.getConfig().firewall.ipBlacklist).toEqual([]);
+      expect(listener).not.toHaveBeenCalled();
+    } finally {
+      fs.chmodSync(file, 0o644);
+    }
   });
 
   test('watches the file and hot-reloads changes', async () => {

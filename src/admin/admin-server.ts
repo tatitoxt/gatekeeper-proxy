@@ -1,7 +1,7 @@
 import http, { IncomingMessage, ServerResponse } from 'node:http';
 import { AddressInfo } from 'node:net';
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { ConfigManager, ConfigValidationError } from '../config/config.js';
+import { ConfigManager, ConfigPersistError, ConfigValidationError } from '../config/config.js';
 import { MetricsCollector } from '../metrics/metrics.js';
 import { DASHBOARD_HTML, DASHBOARD_JS } from './dashboard-ui.js';
 import { isValidIpOrCidr } from '../utils/ip-utils.js';
@@ -134,6 +134,7 @@ export class AdminServer {
             this.configManager.updateConfig({ firewall: { ...firewall, ipBlacklist: [...list] } });
           } catch (err) {
             if (err instanceof ConfigValidationError) throw new HttpError(400, err.issues.join('; '));
+            if (err instanceof ConfigPersistError) throw new HttpError(500, 'Blocklist change could not be saved; nothing was applied');
             throw err;
           }
           logger.warn({ ip, action: method === 'POST' ? 'block' : 'unblock' }, 'Admin API changed IP blacklist');
