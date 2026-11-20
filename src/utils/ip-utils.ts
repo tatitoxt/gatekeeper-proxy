@@ -1,6 +1,5 @@
 import net from 'node:net';
 import { IncomingMessage } from 'node:http';
-import ipRangeCheck from 'ip-range-check';
 
 /** Strips the IPv4-mapped IPv6 prefix so "::ffff:10.0.0.1" matches "10.0.0.1" rules. */
 export function normalizeIp(ip: string): string {
@@ -41,13 +40,23 @@ export function isValidIpOrCidr(value: string): boolean {
   return (version === 4 && bits <= 32) || (version === 6 && bits <= 128);
 }
 
+function toBlockList(ranges: string[]): net.BlockList {
+  const list = new net.BlockList();
+  for (const range of ranges) {
+    const [ip, prefix] = normalizeIp(range).split('/');
+    const family = net.isIP(ip) === 6 ? 'ipv6' : 'ipv4';
+    if (net.isIP(ip) === 0) continue;
+    if (prefix === undefined) list.addAddress(ip, family);
+    else list.addSubnet(ip, Number(prefix), family);
+  }
+  return list;
+}
+
+/** Exact IP or CIDR match (IPv4 and IPv6) using Node's built-in net.BlockList. */
 export function isIpInRanges(ip: string, ranges: string[]): boolean {
   if (!ranges || ranges.length === 0) return false;
   const normalized = normalizeIp(ip);
-  if (net.isIP(normalized) === 0) return false;
-  try {
-    return ipRangeCheck(normalized, ranges);
-  } catch {
-    return ranges.includes(normalized);
-  }
+  const version = net.isIP(normalized);
+  if (version === 0) return false;
+  return toBlockList(ranges).check(normalized, version === 6 ? 'ipv6' : 'ipv4');
 }
