@@ -46,7 +46,7 @@ describe('isIpInRanges', () => {
     expect(isIpInRanges('2001:db8::42', ['2001:db8::/32'])).toBe(true);
     expect(isIpInRanges('2001:db9::1', ['2001:db8::/32'])).toBe(false);
     expect(isIpInRanges('2001:db8::1', ['2001:db8:0:0::1'])).toBe(true);
-    expect(isIpInRanges('10.0.0.1', ['::/0'])).toBe(false);
+    expect(isIpInRanges('2001:db8::1', ['10.0.0.0/8', '0.0.0.0/0'])).toBe(false);
   });
 
   test('never matches empty lists or non-IP input', () => {
