@@ -1,7 +1,10 @@
 {
   "preset": "ts-jest",
   "testEnvironment": "node",
+  "roots": ["<rootDir>/tests"],
+  "setupFiles": ["<rootDir>/tests/setup-env.ts"],
   "moduleNameMapper": {
-    "^(\\..*)\\.js$": "$1"
-  }
+    "^(\\.{1,2}/.*)\\.js$": "$1"
+  },
+  "collectCoverageFrom": ["src/**/*.ts", "!src/index.ts"]
 }
