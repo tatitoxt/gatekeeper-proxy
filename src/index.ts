@@ -1,40 +1,38 @@
 import { ConfigManager } from './config/config.js';
 import { ProxyServer } from './core/proxy.js';
 import { AdminServer } from './admin/admin-server.js';
+import { MetricsCollector } from './metrics/metrics.js';
 import { logger } from './utils/logger.js';
 
-async function bootstrap() {
-  logger.info('Starting Gatekeeper Proxy Engine...');
-
+async function bootstrap(): Promise<void> {
   const configManager = new ConfigManager();
-  const initialConfig = configManager.getConfig();
-
-  const proxyServer = new ProxyServer(initialConfig);
-  const adminServer = new AdminServer(configManager);
-
-  // Subscribe proxy server to config changes for real-time hot reloading
-  configManager.onChange((newConfig) => {
-    logger.info('Applying updated configuration to Proxy engine...');
-    proxyServer.updateConfig(newConfig);
+  const metrics = new MetricsCollector();
+  const proxyServer = new ProxyServer(configManager.getConfig(), metrics);
+  const adminServer = new AdminServer(configManager, metrics, {
+    token: process.env.GATEKEEPER_ADMIN_TOKEN || undefined
   });
+
+  configManager.onChange((config) => proxyServer.updateConfig(config));
 
   await proxyServer.start();
   await adminServer.start();
+  logger.info({ config: configManager.getPath() }, 'Gatekeeper ready');
 
-  logger.info('🛡️ Gatekeeper Proxy Engine initialized and ready for production traffic.');
-
-  const shutdown = async () => {
-    logger.info('Shutting down Gatekeeper Proxy...');
-    await proxyServer.stop();
-    await adminServer.stop();
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info({ signal }, 'Shutting down Gatekeeper');
+    configManager.close();
+    await Promise.all([proxyServer.stop(), adminServer.stop()]);
     process.exit(0);
   };
 
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
 }
 
-bootstrap().catch((err) => {
-  logger.error({ err }, 'Fatal error during Gatekeeper Proxy initialization');
+bootstrap().catch((err: unknown) => {
+  logger.fatal({ err: err instanceof Error ? err.message : err }, 'Gatekeeper failed to start');
   process.exit(1);
 });
