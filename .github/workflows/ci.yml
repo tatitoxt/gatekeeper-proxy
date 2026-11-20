@@ -15,7 +15,7 @@ concurrency:
 jobs:
   checks:
     name: Lint, typecheck, unit + integration (Node ${{ matrix.node }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -36,7 +36,7 @@ jobs:
 
   e2e:
     name: E2E (gateway process + Playwright dashboard)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -60,7 +60,7 @@ jobs:
 
   docker:
     name: Docker Compose demo smoke test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       GATEKEEPER_ADMIN_TOKEN: ci-token-not-a-secret
     steps:
