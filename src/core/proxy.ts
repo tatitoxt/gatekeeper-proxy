@@ -168,6 +168,11 @@ export class ProxyServer {
       'x-real-ip': clientIp,
       'x-gatekeeper-proxy': '1.0'
     };
+    // Transfer-Encoding is hop-by-hop and stripped above; re-frame chunked bodies so Node does not
+    // write them raw (unframed) for methods like GET/DELETE, which would allow request smuggling.
+    if (req.headers['transfer-encoding'] && headers['content-length'] === undefined) {
+      headers['transfer-encoding'] = 'chunked';
+    }
 
     let released = false;
     const release = () => {

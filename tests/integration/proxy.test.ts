@@ -1,4 +1,4 @@
-import { AddressInfo } from 'node:net';
+import net, { AddressInfo } from 'node:net';
 import { ProxyServer } from '../../src/core/proxy.js';
 import { GatekeeperConfig } from '../../src/config/config.js';
 import { makeConfig, rawRequest, request, startUpstream, Upstream } from '../helpers.js';
@@ -62,6 +62,30 @@ describe('ProxyServer (in-process, real sockets)', () => {
     const one = first.json<{ upstream: string; url: string; method: string; body: string }>();
     expect(one).toMatchObject({ url: '/api/v1/users?page=2', method: 'POST', body: '{"name":"Ada"}' });
     expect(new Set([one.upstream, second.json().upstream])).toEqual(new Set(['a', 'b']));
+  });
+
+  test('re-frames chunked GET bodies so an embedded request cannot be smuggled upstream', async () => {
+    const smuggled = 'GET /api/smuggled HTTP/1.1\r\nHost: upstream\r\n\r\n';
+    const chunk = Buffer.byteLength(smuggled).toString(16);
+    const [beforeA, beforeB] = [a.requests.length, b.requests.length];
+    const response = await new Promise<string>((resolve, reject) => {
+      const socket = net.connect(port, '127.0.0.1', () => {
+        socket.write(
+          'GET /api/chunked HTTP/1.1\r\nHost: gatekeeper\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n' +
+            `${chunk}\r\n${smuggled}\r\n0\r\n\r\n`
+        );
+      });
+      let data = '';
+      socket.on('data', (d) => (data += d.toString()));
+      socket.on('end', () => resolve(data));
+      socket.on('error', reject);
+    });
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(response).toMatch(/^HTTP\/1\.1 200/);
+    const received = [...a.requests.slice(beforeA), ...b.requests.slice(beforeB)];
+    expect(received.map((r) => r.url)).toEqual(['/api/chunked']);
+    expect(received[0].body).toBe(smuggled);
   });
 
   test('sets forwarding headers and strips hop-by-hop headers', async () => {
