@@ -62,14 +62,32 @@ function decodeValidSequences(value: string): string {
   try {
     return decodeURIComponent(value);
   } catch {
-    return value.replace(/(?:%[0-9a-fA-F]{2})+/g, (seq) => {
-      try {
-        return decodeURIComponent(seq);
-      } catch {
-        return seq;
-      }
-    });
+    return value.replace(/(?:%[0-9a-fA-F]{2})+/g, decodeEscapeRun);
   }
+}
+
+/** Decodes each valid UTF-8 sequence (1-4 escapes) in a run, keeping only invalid escapes literal. */
+function decodeEscapeRun(run: string): string {
+  const escapes = run.match(/%[0-9a-fA-F]{2}/g) ?? [];
+  let out = '';
+  let i = 0;
+  while (i < escapes.length) {
+    let consumed = 0;
+    for (let n = Math.min(4, escapes.length - i); n >= 1 && consumed === 0; n--) {
+      try {
+        out += decodeURIComponent(escapes.slice(i, i + n).join(''));
+        consumed = n;
+      } catch {
+        // try a shorter sequence
+      }
+    }
+    if (consumed === 0) {
+      out += escapes[i];
+      consumed = 1;
+    }
+    i += consumed;
+  }
+  return out;
 }
 
 export class FirewallEngine {

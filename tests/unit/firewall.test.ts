@@ -126,6 +126,8 @@ describe('decodeForInspection', () => {
     expect(decodeForInspection('/api?q=100%25')).toBe('/api?q=100%');
     expect(decodeForInspection('/api?q=100%25%20off')).toBe('/api?q=100% off');
     expect(decodeForInspection('%252e%252e%252f%25')).toBe('../%');
+    expect(decodeForInspection('%253C%25FF%253E')).toBe('<%FF>');
+    expect(decodeForInspection('%253C%25C3%25A9%25FF')).toBe('<é%FF');
     const engine = new FirewallEngine(baseConfig());
     expect(engine.checkRequest(req('/api?discount=100%25'), CLIENT).allowed).toBe(true);
     expect(engine.checkRequest(req('/files/%252e%252e%252f%25/etc/passwd'), CLIENT).allowed).toBe(false);
