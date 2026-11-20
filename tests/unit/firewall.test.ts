@@ -121,4 +121,13 @@ describe('decodeForInspection', () => {
     expect(decodeForInspection('a+b')).toBe('a b');
     expect(decodeForInspection('%zz')).toBeNull();
   });
+
+  test('accepts an encoded literal percent sign but still decodes encoded payloads around it', () => {
+    expect(decodeForInspection('/api?q=100%25')).toBe('/api?q=100%');
+    expect(decodeForInspection('/api?q=100%25%20off')).toBe('/api?q=100% off');
+    expect(decodeForInspection('%252e%252e%252f%25')).toBe('../%');
+    const engine = new FirewallEngine(baseConfig());
+    expect(engine.checkRequest(req('/api?discount=100%25'), CLIENT).allowed).toBe(true);
+    expect(engine.checkRequest(req('/files/%252e%252e%252f%25/etc/passwd'), CLIENT).allowed).toBe(false);
+  });
 });

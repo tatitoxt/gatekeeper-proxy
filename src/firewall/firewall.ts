@@ -43,18 +43,33 @@ const MAX_DECODE_PASSES = 3;
  * Returns null for malformed percent-encoding, which decodeURIComponent would throw on.
  */
 export function decodeForInspection(value: string): string | null {
-  let current = value;
-  for (let i = 0; i < MAX_DECODE_PASSES; i++) {
-    let next: string;
-    try {
-      next = decodeURIComponent(current);
-    } catch {
-      return null;
-    }
+  let current: string;
+  try {
+    current = decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+  // Later passes are lenient: a decoded literal "%" (from "%25") is legitimate input.
+  for (let i = 1; i < MAX_DECODE_PASSES; i++) {
+    const next = decodeValidSequences(current);
     if (next === current) break;
     current = next;
   }
   return current.replace(/\+/g, ' ');
+}
+
+function decodeValidSequences(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value.replace(/(?:%[0-9a-fA-F]{2})+/g, (seq) => {
+      try {
+        return decodeURIComponent(seq);
+      } catch {
+        return seq;
+      }
+    });
+  }
 }
 
 export class FirewallEngine {
