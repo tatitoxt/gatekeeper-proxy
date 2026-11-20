@@ -1,14 +1,25 @@
-version: '3.8'
-
+# Self-contained demo: the gateway in front of three synthetic upstream services.
+#   GATEKEEPER_ADMIN_TOKEN=change-me docker compose up --build
 services:
-  gatekeeper-proxy:
+  upstreams:
     build: .
+    command: ["node", "scripts/demo-upstreams.mjs"]
+    environment:
+      DEMO_UPSTREAM_HOST: 0.0.0.0
+
+  gatekeeper:
+    build: .
+    depends_on: [upstreams]
     ports:
       - "8000:8000"
-      - "8080:8080"
+      # The admin API listens on 0.0.0.0 inside the container (so a token is required);
+      # on the host it is only published on loopback.
+      - "127.0.0.1:8080:8080"
     environment:
-      - NODE_ENV=production
-      - LOG_LEVEL=info
+      LOG_LEVEL: info
+      GATEKEEPER_CONFIG: /app/config/gatekeeper.config.json
+      GATEKEEPER_ADMIN_TOKEN: ${GATEKEEPER_ADMIN_TOKEN:?Set GATEKEEPER_ADMIN_TOKEN to protect the admin API}
     volumes:
-      - ./gatekeeper.config.json:/app/gatekeeper.config.json
+      # Writable: blacklist changes made through the admin API are persisted here.
+      - ./examples/docker.config.json:/app/config/gatekeeper.config.json
     restart: unless-stopped
