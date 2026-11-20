@@ -61,6 +61,13 @@ export function makeConfig(overrides: Partial<GatekeeperConfig> = {}): Gatekeepe
   };
 }
 
+/** Node does not chunk DELETE/GET bodies by default, so always send Content-Length. */
+function withLength(options: { headers?: Record<string, string>; body?: string }): Record<string, string> {
+  const headers = { ...(options.headers ?? {}) };
+  if (options.body !== undefined) headers['content-length'] = String(Buffer.byteLength(options.body));
+  return headers;
+}
+
 export interface HttpResult {
   status: number;
   headers: IncomingHttpHeaders;
@@ -73,7 +80,7 @@ export function request(
   options: { method?: string; headers?: Record<string, string>; body?: string } = {}
 ): Promise<HttpResult> {
   return new Promise((resolve, reject) => {
-    const req = http.request(url, { method: options.method || 'GET', headers: options.headers, agent: false }, (res) => {
+    const req = http.request(url, { method: options.method || 'GET', headers: withLength(options), agent: false }, (res) => {
       const chunks: Buffer[] = [];
       res.on('data', (c: Buffer) => chunks.push(c));
       res.on('end', () => {
@@ -95,7 +102,7 @@ export function rawRequest(
 ): Promise<HttpResult> {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      { host: '127.0.0.1', port, path, method: options.method || 'GET', headers: options.headers, agent: false },
+      { host: '127.0.0.1', port, path, method: options.method || 'GET', headers: withLength(options), agent: false },
       (res) => {
         const chunks: Buffer[] = [];
         res.on('data', (c: Buffer) => chunks.push(c));
