@@ -3,7 +3,9 @@
     "port": 8000,
     "adminPort": 8080,
     "host": "0.0.0.0",
-    "timeoutMs": 30000
+    "timeoutMs": 30000,
+    "adminHost": "127.0.0.1",
+    "trustProxy": false
   },
   "routes": [
     {
@@ -56,5 +58,9 @@
   "rateLimiter": {
     "globalWindowMs": 60000,
     "globalMaxRequests": 300
+  },
+  "healthCheck": {
+    "intervalMs": 10000,
+    "timeoutMs": 3000
   }
 }

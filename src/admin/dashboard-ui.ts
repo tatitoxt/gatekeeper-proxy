@@ -1,13 +1,10 @@
-export function getDashboardHtml(): string {
-  return `<!DOCTYPE html>
+// Static admin dashboard. Served with a strict CSP; all dynamic data is rendered via textContent.
+export const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Gatekeeper-Proxy // Admin & Security Dashboard</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
+  <title>Gatekeeper Proxy - Admin Dashboard</title>
   <style>
     :root {
       --bg: #0b0f19;
@@ -26,7 +23,7 @@ export function getDashboardHtml(): string {
     body {
       background-color: var(--bg);
       color: var(--text);
-      font-family: 'Outfit', sans-serif;
+      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
       padding: 24px;
       line-height: 1.5;
     }
@@ -113,7 +110,7 @@ export function getDashboardHtml(): string {
     .metric-value {
       font-size: 28px;
       font-weight: 700;
-      font-family: 'JetBrains Mono', monospace;
+      font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
     }
 
     .grid-two {
@@ -154,7 +151,7 @@ export function getDashboardHtml(): string {
     table {
       width: 100%;
       border-collapse: collapse;
-      font-family: 'JetBrains Mono', monospace;
+      font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
       font-size: 13px;
     }
 
@@ -205,150 +202,198 @@ export function getDashboardHtml(): string {
       font-family: inherit;
       margin-right: 8px;
     }
+  
+    .auth-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 20px; }
+    .auth-bar input { flex: 1; max-width: 360px; }
+    .notice { font-size: 13px; color: var(--text-muted); min-height: 18px; }
+    .notice.error { color: var(--danger); }
+    .route-item { padding: 8px; background: rgba(255,255,255,0.03); border-radius: 6px; margin-bottom: 6px; }
+    .route-prefix { color: var(--accent); }
+    .empty { text-align: center; color: var(--text-muted); }
+    .path-cell { word-break: break-all; }
   </style>
 </head>
 <body>
   <header>
     <div class="brand">
-      <span class="brand-icon">🛡️</span>
+      <span class="brand-icon" aria-hidden="true">&#128737;</span>
       <div>
-        <h1>Gatekeeper-Proxy</h1>
-        <p style="font-size: 12px; color: var(--text-muted);">Dynamic Reverse Proxy, WAF & Rate Limiting Engine</p>
+        <h1>Gatekeeper Proxy</h1>
+        <p style="font-size: 12px; color: var(--text-muted);">Reverse proxy with IP rules, request signatures and rate limiting</p>
       </div>
     </div>
-    <div class="status-badge">
-      <span class="pulse"></span>
-      SYSTEM ONLINE & PROTECTED
-    </div>
+    <div class="status-badge" id="status-badge"><span class="pulse"></span><span id="status-text">Connecting...</span></div>
   </header>
 
+  <form class="auth-bar" id="auth-form">
+    <input type="password" id="input-token" placeholder="Admin token (leave empty if the admin API has no token)" autocomplete="off" aria-label="Admin token">
+    <button class="btn" type="submit">Connect</button>
+  </form>
+
   <div class="metrics-grid">
-    <div class="metric-card">
-      <div class="metric-title">Total Requests</div>
-      <div class="metric-value" id="val-total-reqs">0</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-title">Requests / Sec</div>
-      <div class="metric-value" id="val-rps">0.00</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-title">WAF Blocks</div>
-      <div class="metric-value" style="color: var(--danger);" id="val-waf-blocks">0</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-title">Rate Limit Hits</div>
-      <div class="metric-value" style="color: var(--warning);" id="val-rate-hits">0</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-title">Uptime</div>
-      <div class="metric-value" id="val-uptime">0s</div>
-    </div>
+    <div class="metric-card"><div class="metric-title">Total Requests</div><div class="metric-value" id="val-total-reqs">0</div></div>
+    <div class="metric-card"><div class="metric-title">Avg Req/s Since Start</div><div class="metric-value" id="val-rps">0</div></div>
+    <div class="metric-card"><div class="metric-title">Firewall Blocks</div><div class="metric-value" style="color: var(--danger);" id="val-waf-blocks">0</div></div>
+    <div class="metric-card"><div class="metric-title">Rate Limit Hits</div><div class="metric-value" style="color: var(--warning);" id="val-rate-hits">0</div></div>
+    <div class="metric-card"><div class="metric-title">Uptime</div><div class="metric-value" id="val-uptime">0s</div></div>
   </div>
 
   <div class="grid-two">
     <div class="panel">
       <div class="panel-header">
-        <div class="panel-title">⚠️ Security Threat Log & Blocked Events</div>
-        <span style="font-size: 12px; color: var(--text-muted);">Real-time WAF & Rate Limit Triggers</span>
+        <div class="panel-title">Recent Security Events</div>
+        <span style="font-size: 12px; color: var(--text-muted);">Last 100 firewall and rate-limit rejections (in memory)</span>
       </div>
       <table>
-        <thead>
-          <tr>
-            <th>Timestamp</th>
-            <th>IP Address</th>
-            <th>Method</th>
-            <th>Path</th>
-            <th>Reason</th>
-          </tr>
-        </thead>
-        <tbody id="events-table-body">
-          <tr><td colspan="5" style="text-align: center; color: var(--text-muted);">No security block events recorded yet.</td></tr>
-        </tbody>
+        <thead><tr><th>Time (UTC)</th><th>IP Address</th><th>Method</th><th>Path</th><th>Reason</th></tr></thead>
+        <tbody id="events-table-body"><tr><td colspan="5" class="empty">No security events recorded yet.</td></tr></tbody>
       </table>
     </div>
 
     <div class="panel">
-      <div class="panel-header">
-        <div class="panel-title">🛡️ Quick Firewall Action</div>
-      </div>
-      <div style="margin-bottom: 16px;">
-        <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 8px;">Block IP Address dynamically:</p>
-        <input type="text" id="input-block-ip" placeholder="e.g. 192.168.1.100" style="width: 100%; margin-bottom: 10px;">
-        <button class="btn" style="width: 100%; background: var(--danger);" onclick="blockIp()">Add to IP Blacklist</button>
-      </div>
-
+      <div class="panel-header"><div class="panel-title">Firewall Action</div></div>
+      <form id="block-form" style="margin-bottom: 16px;">
+        <label for="input-block-ip" style="display: block; font-size: 13px; color: var(--text-muted); margin-bottom: 8px;">Block an IP address or CIDR range:</label>
+        <input type="text" id="input-block-ip" placeholder="e.g. 203.0.113.7 or 198.51.100.0/24" style="width: 100%; margin-bottom: 10px;">
+        <button class="btn" type="submit" style="width: 100%; background: var(--danger);">Add to IP Blacklist</button>
+        <p class="notice" id="block-notice" role="status"></p>
+      </form>
       <div style="margin-top: 24px;">
         <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 8px;">Configured Routes:</p>
-        <div id="routes-list" style="font-family: 'JetBrains Mono', monospace; font-size: 12px;">Loading routes...</div>
+        <div id="routes-list" style="font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;">Loading routes...</div>
       </div>
     </div>
   </div>
+  <script src="/_admin/app.js"></script>
+</body>
+</html>
+`;
 
-  <script>
-    async function fetchMetrics() {
-      try {
-        const res = await fetch('/api/metrics');
-        const data = await res.json();
-        
-        document.getElementById('val-total-reqs').innerText = data.totalRequests;
-        document.getElementById('val-rps').innerText = data.requestsPerSecond;
-        document.getElementById('val-waf-blocks').innerText = data.wafBlocks;
-        document.getElementById('val-rate-hits').innerText = data.rateLimitHits;
-        document.getElementById('val-uptime').innerText = data.uptimeSeconds + 's';
+export const DASHBOARD_JS = String.raw`'use strict';
+(function () {
+  var TOKEN_KEY = 'gatekeeper-admin-token';
+  var $ = function (id) { return document.getElementById(id); };
 
-        const tbody = document.getElementById('events-table-body');
-        if (data.recentEvents && data.recentEvents.length > 0) {
-          tbody.innerHTML = data.recentEvents.map(e => \`
-            <tr>
-              <td style="color: var(--text-muted);">\${e.timestamp.split('T')[1].split('.')[0]}</td>
-              <td>\${e.ip}</td>
-              <td><span class="tag tag-warning">\${e.method}</span></td>
-              <td>\${e.path}</td>
-              <td><span class="tag tag-danger">\${e.reason}</span></td>
-            </tr>
-          \`).join('');
-        } else {
-          tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">No security block events recorded yet.</td></tr>';
-        }
-      } catch (err) {
-        console.error('Failed to fetch metrics:', err);
-      }
-    }
+  function token() { return sessionStorage.getItem(TOKEN_KEY) || ''; }
 
-    async function fetchRoutes() {
-      try {
-        const res = await fetch('/api/routes');
-        const routes = await res.json();
-        const container = document.getElementById('routes-list');
-        container.innerHTML = routes.map(r => \`
-          <div style="padding: 8px; background: rgba(255,255,255,0.03); border-radius: 6px; margin-bottom: 6px;">
-            <span style="color: var(--accent);">\${r.pathPrefix}</span> &rarr; \${r.targets.join(', ')}
-          </div>
-        \`).join('');
-      } catch (err) {
-        console.error('Failed to fetch routes', err);
-      }
-    }
-
-    async function blockIp() {
-      const ip = document.getElementById('input-block-ip').value.trim();
-      if (!ip) return alert('Please enter a valid IP address');
-
-      await fetch('/api/firewall/blacklist', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ip })
+  function api(path, options) {
+    options = options || {};
+    var headers = Object.assign({}, options.headers || {});
+    if (token()) headers['Authorization'] = 'Bearer ' + token();
+    return fetch(path, Object.assign({}, options, { headers: headers })).then(function (res) {
+      if (res.status === 401) throw new Error('Unauthorized: enter a valid admin token');
+      return res.json().then(function (body) {
+        if (!res.ok) throw new Error(body.error || ('HTTP ' + res.status));
+        return body;
       });
+    });
+  }
 
-      alert('IP ' + ip + ' added to blacklist successfully!');
-      document.getElementById('input-block-ip').value = '';
-      fetchMetrics();
+  // Event fields come from attacker-controlled requests: only ever render them as text.
+  function cell(text, className) {
+    var td = document.createElement('td');
+    if (className) {
+      var span = document.createElement('span');
+      span.className = className;
+      span.textContent = text;
+      td.appendChild(span);
+    } else {
+      td.textContent = text;
     }
+    return td;
+  }
 
-    setInterval(fetchMetrics, 2000);
+  function setStatus(ok, text) {
+    $('status-text').textContent = text;
+    $('status-badge').style.opacity = ok ? '1' : '0.5';
+  }
+
+  function renderEvents(events) {
+    var tbody = $('events-table-body');
+    tbody.replaceChildren();
+    if (!events || events.length === 0) {
+      var row = document.createElement('tr');
+      var td = cell('No security events recorded yet.');
+      td.colSpan = 5;
+      td.className = 'empty';
+      row.appendChild(td);
+      tbody.appendChild(row);
+      return;
+    }
+    events.forEach(function (e) {
+      var row = document.createElement('tr');
+      row.setAttribute('data-event-type', e.type);
+      row.appendChild(cell(String(e.timestamp).slice(11, 19)));
+      row.appendChild(cell(e.ip));
+      row.appendChild(cell(e.method, 'tag tag-warning'));
+      var pathCell = cell(e.path);
+      pathCell.className = 'path-cell';
+      row.appendChild(pathCell);
+      row.appendChild(cell(e.reason, 'tag tag-danger'));
+      tbody.appendChild(row);
+    });
+  }
+
+  function fetchMetrics() {
+    return api('/api/metrics').then(function (data) {
+      $('val-total-reqs').textContent = String(data.totalRequests);
+      $('val-rps').textContent = String(data.averageRequestsPerSecond);
+      $('val-waf-blocks').textContent = String(data.wafBlocks);
+      $('val-rate-hits').textContent = String(data.rateLimitHits);
+      $('val-uptime').textContent = data.uptimeSeconds + 's';
+      renderEvents(data.recentEvents);
+      setStatus(true, 'Connected');
+    }).catch(function (err) { setStatus(false, err.message); });
+  }
+
+  function fetchRoutes() {
+    return api('/api/routes').then(function (routes) {
+      var list = $('routes-list');
+      list.replaceChildren();
+      if (routes.length === 0) list.textContent = 'No routes configured.';
+      routes.forEach(function (r) {
+        var item = document.createElement('div');
+        item.className = 'route-item';
+        var prefix = document.createElement('span');
+        prefix.className = 'route-prefix';
+        prefix.textContent = r.pathPrefix;
+        item.appendChild(prefix);
+        item.appendChild(document.createTextNode(' \u2192 ' + r.targets.join(', ')));
+        list.appendChild(item);
+      });
+    }).catch(function (err) { $('routes-list').textContent = err.message; });
+  }
+
+  $('auth-form').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    sessionStorage.setItem(TOKEN_KEY, $('input-token').value.trim());
+    $('input-token').value = '';
     fetchMetrics();
     fetchRoutes();
-  </script>
-</body>
-</html>`;
-}
+  });
+
+  $('block-form').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var notice = $('block-notice');
+    var ip = $('input-block-ip').value.trim();
+    if (!ip) return;
+    api('/api/firewall/blacklist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ip: ip })
+    }).then(function (body) {
+      notice.className = 'notice';
+      notice.textContent = body.changed ? ('Blocked ' + ip) : (ip + ' was already blocked');
+      $('input-block-ip').value = '';
+      fetchMetrics();
+    }).catch(function (err) {
+      notice.className = 'notice error';
+      notice.textContent = err.message;
+    });
+  });
+
+  setInterval(fetchMetrics, 2000);
+  fetchMetrics();
+  fetchRoutes();
+})();
+`;
