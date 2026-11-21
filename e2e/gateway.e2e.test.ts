@@ -30,6 +30,18 @@ describe('gatekeeper (dist/index.js) end to end', () => {
     expect(seen).toEqual(new Set([`demo-upstream-${stack.upstreamPorts[0]}`, `demo-upstream-${stack.upstreamPorts[1]}`]));
   });
 
+  test('streams multi-MiB request bodies without truncation', async () => {
+    const payload = 'x'.repeat(8 * 1024 * 1024); // 8 MiB — the proxy pipes, never buffers
+    const res = await fetch(`${stack.proxyUrl}/auth/upload`, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: payload
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.body).toHaveLength(payload.length);
+  });
+
   test('forwards POST bodies to the /auth upstream', async () => {
     const res = await fetch(`${stack.proxyUrl}/auth/login`, {
       method: 'POST',
