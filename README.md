@@ -10,6 +10,10 @@ signature-based firewall and an admin dashboard — configured with one JSON fil
 It is a learning/portfolio project: the code is meant to be read. See [Limitations](#limitations)
 before thinking about putting it in front of anything real.
 
+<p align="center">
+  <img src="docs/demo.svg" width="880" alt="gatekeeper proxying a request, blocking sqlmap, SQLi and .env probes">
+</p>
+
 ## Problem
 
 Small services often need the same edge concerns — "send `/api` to these two instances", "stop one
