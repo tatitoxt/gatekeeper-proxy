@@ -99,24 +99,20 @@ export class ProxyServer {
   /** TCP upgrade entry point (WebSocket, CONNECT-style upgrades). Runs the same
    * firewall/rate-limit/route pipeline as HTTP, then tunnels bytes both ways. */
   public handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
-    try {
-      this.routeUpgrade(req, socket, head);
-    } catch (err) {
+    this.routeUpgrade(req, socket, head).catch((err) => {
       logger.error({ err, url: req.url }, 'Unhandled error while processing upgrade');
       socket.destroy();
-    }
+    });
   }
 
   public handleRequest(req: IncomingMessage, res: ServerResponse): void {
-    try {
-      this.route(req, res);
-    } catch (err) {
+    this.route(req, res).catch((err) => {
       logger.error({ err, url: req.url }, 'Unhandled error while processing request');
       this.sendError(res, 500, 'Unexpected proxy error');
-    }
+    });
   }
 
-  private route(req: IncomingMessage, res: ServerResponse): void {
+  private async route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const clientIp = getClientIp(req, this.config.server.trustProxy);
     const url = req.url || '/';
     const method = req.method || 'GET';
@@ -135,7 +131,7 @@ export class ProxyServer {
     }
 
     // 2. Rate limit (route window and global per-IP window)
-    const limit = this.rateLimiter.checkRateLimit(clientIp, route?.pathPrefix, route?.rateLimit);
+    const limit = await this.rateLimiter.checkRateLimit(clientIp, route?.pathPrefix, route?.rateLimit);
     const resetSeconds = Math.ceil(limit.resetMs / 1000);
     res.setHeader('X-RateLimit-Limit', limit.limit);
     res.setHeader('X-RateLimit-Remaining', limit.remaining);
@@ -247,7 +243,7 @@ export class ProxyServer {
     req.pipe(proxyReq);
   }
 
-  private routeUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
+  private async routeUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     const clientIp = getClientIp(req, this.config.server.trustProxy);
     const url = req.url || '/';
     const method = req.method || 'GET';
@@ -262,7 +258,7 @@ export class ProxyServer {
       return;
     }
 
-    const limit = this.rateLimiter.checkRateLimit(clientIp, route?.pathPrefix, route?.rateLimit);
+    const limit = await this.rateLimiter.checkRateLimit(clientIp, route?.pathPrefix, route?.rateLimit);
     if (!limit.allowed) {
       this.metrics.recordRateLimitHit(clientIp, url, method);
       this.rejectUpgrade(socket, 429);
@@ -387,10 +383,10 @@ export class ProxyServer {
     });
   }
 
-  public stop(): Promise<void> {
+  public async stop(): Promise<void> {
     this.loadBalancer.stop();
-    this.rateLimiter.close();
-    return new Promise((resolve) => {
+    const closeLimiter = this.rateLimiter.close();
+    await new Promise<void>((resolve) => {
       const server = this.server;
       if (!server) return resolve();
       this.server = null;
@@ -399,5 +395,6 @@ export class ProxyServer {
       // Give in-flight requests a grace period, then drop remaining keep-alive sockets.
       setTimeout(() => server.closeAllConnections(), 5000).unref();
     });
+    await closeLimiter;
   }
 }

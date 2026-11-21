@@ -1,40 +1,34 @@
 import { RateLimiterConfig, RouteRateLimit } from '../config/config.js';
+import { createRateLimitStore, type RateLimitStore } from './store-factory.js';
+import type { RateLimitResult } from './store.js';
 
-interface WindowRecord {
-  timestamps: number[];
-  windowMs: number;
-}
-
-export interface RateLimitResult {
-  allowed: boolean;
-  limit: number;
-  remaining: number;
-  /** Milliseconds until the oldest counted request leaves the window. */
-  resetMs: number;
-  scope: 'route' | 'global';
-}
-
-interface WindowCheck {
-  record: WindowRecord;
-  result: RateLimitResult;
-}
+export type { RateLimitResult } from './store.js';
 
 /**
- * In-memory sliding-window log limiter, keyed by client IP. A request is counted only if it
- * passes both the route limit (when configured) and the global per-IP limit, so rejected
- * requests never consume quota.
+ * Sliding-window rate limiter, keyed by client IP. A request is counted only if
+ * it passes both the route limit (when configured) and the global per-IP limit,
+ * so rejected requests never consume quota.
+ *
+ * The storage backend is pluggable: in-memory (default, per-process) or Redis
+ * (`rateLimiter.backend: 'redis'`), which shares the budget across instances.
  */
 export class RateLimiterEngine {
   private globalConfig: RateLimiterConfig;
-  private globalStore: Map<string, WindowRecord> = new Map();
-  private routeStores: Map<string, Map<string, WindowRecord>> = new Map();
+  private readonly store: RateLimitStore;
   private readonly now: () => number;
   private cleanupTimer: NodeJS.Timeout;
 
-  constructor(globalConfig: RateLimiterConfig, now: () => number = Date.now) {
+  constructor(
+    globalConfig: RateLimiterConfig,
+    now: () => number = Date.now,
+    store: RateLimitStore = createRateLimitStore(globalConfig)
+  ) {
     this.globalConfig = globalConfig;
     this.now = now;
-    this.cleanupTimer = setInterval(() => this.sweep(), 60000);
+    this.store = store;
+    this.cleanupTimer = setInterval(() => {
+      void this.sweep();
+    }, 60000);
     this.cleanupTimer.unref();
   }
 
@@ -42,95 +36,37 @@ export class RateLimiterEngine {
     this.globalConfig = globalConfig;
   }
 
-  public checkRateLimit(clientIp: string, routePrefix?: string, routeLimit?: RouteRateLimit): RateLimitResult {
-    const now = this.now();
-    const checks: WindowCheck[] = [];
-
-    if (routePrefix !== undefined && routeLimit) {
-      let store = this.routeStores.get(routePrefix);
-      if (!store) {
-        store = new Map();
-        this.routeStores.set(routePrefix, store);
-      }
-      checks.push(this.inspect(store, clientIp, now, routeLimit.windowMs, routeLimit.maxRequests, 'route'));
-    }
-    checks.push(
-      this.inspect(
-        this.globalStore,
-        clientIp,
-        now,
-        this.globalConfig.globalWindowMs,
-        this.globalConfig.globalMaxRequests,
-        'global'
-      )
+  public async checkRateLimit(
+    clientIp: string,
+    routePrefix?: string,
+    routeLimit?: RouteRateLimit
+  ): Promise<RateLimitResult> {
+    const route =
+      routePrefix !== undefined && routeLimit
+        ? { key: routePrefix, windowMs: routeLimit.windowMs, maxRequests: routeLimit.maxRequests }
+        : null;
+    return this.store.check(
+      clientIp,
+      route,
+      {
+        windowMs: this.globalConfig.globalWindowMs,
+        maxRequests: this.globalConfig.globalMaxRequests
+      },
+      this.now()
     );
-
-    const blocked = checks.find((c) => !c.result.allowed);
-    if (blocked) return blocked.result;
-
-    for (const check of checks) check.record.timestamps.push(now);
-
-    // Report the most restrictive window in the response headers.
-    return checks.map((c) => c.result).reduce((a, b) => (b.remaining < a.remaining ? b : a));
   }
 
   /** Drops records whose newest request has left its window. Returns the number removed. */
-  public sweep(): number {
-    const now = this.now();
-    let removed = 0;
-    for (const store of [this.globalStore, ...this.routeStores.values()]) {
-      for (const [key, record] of store) {
-        const newest = record.timestamps[record.timestamps.length - 1];
-        if (newest === undefined || newest <= now - record.windowMs) {
-          store.delete(key);
-          removed++;
-        }
-      }
-    }
-    return removed;
+  public async sweep(): Promise<number> {
+    return this.store.sweep(this.now());
   }
 
-  public trackedKeys(): number {
-    let total = this.globalStore.size;
-    for (const store of this.routeStores.values()) total += store.size;
-    return total;
+  public async trackedKeys(): Promise<number> {
+    return this.store.trackedKeys();
   }
 
-  public close(): void {
+  public async close(): Promise<void> {
     clearInterval(this.cleanupTimer);
-  }
-
-  private inspect(
-    store: Map<string, WindowRecord>,
-    key: string,
-    now: number,
-    windowMs: number,
-    maxRequests: number,
-    scope: RateLimitResult['scope']
-  ): WindowCheck {
-    let record = store.get(key);
-    if (!record) {
-      record = { timestamps: [], windowMs };
-      store.set(key, record);
-    }
-    record.windowMs = windowMs;
-    const windowStart = now - windowMs;
-    record.timestamps = record.timestamps.filter((ts) => ts > windowStart);
-
-    const count = record.timestamps.length;
-    const oldest = record.timestamps[0] ?? now;
-    const resetMs = Math.max(0, oldest + windowMs - now);
-    const allowed = count < maxRequests;
-
-    return {
-      record,
-      result: {
-        allowed,
-        limit: maxRequests,
-        remaining: allowed ? maxRequests - count - 1 : 0,
-        resetMs,
-        scope
-      }
-    };
+    await this.store.close();
   }
 }

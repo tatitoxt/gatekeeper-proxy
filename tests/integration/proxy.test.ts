@@ -26,7 +26,7 @@ describe('ProxyServer (in-process, real sockets)', () => {
         ipWhitelist: [],
         blockedUserAgents: ['sqlmap'],
         wafRules: { blockSqlInjection: true, blockXss: true, blockPathTraversal: true },
-        customBlockedPaths: ['^/\\.env']
+        customBlockedPaths: ['^/\\.env'], inspectedHeaders: []
       },
       rateLimiter: { globalWindowMs: 60_000, globalMaxRequests: 1000 }
     });

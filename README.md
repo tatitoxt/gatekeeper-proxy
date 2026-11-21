@@ -26,7 +26,7 @@ trust boundaries) are visible and tested.
 | Load balancing | `round-robin` or `least-connections` per route. |
 | Health checks | Routes with `healthCheckPath` are probed every `healthCheck.intervalMs`; failing targets (or ones that refuse connections) leave rotation until a probe succeeds, and `503` is returned when none are left. |
 | Proxying | Streams bodies both ways, sets `X-Forwarded-For/-Host/-Proto` and `X-Real-IP`, strips hop-by-hop headers, `502` on upstream errors and `504` after `server.timeoutMs`. |
-| Rate limiting | In-memory sliding window per client IP: a global limit plus optional per-route limits. Returns `429` with `X-RateLimit-*` and `Retry-After`. |
+| Rate limiting | Sliding window per client IP: a global limit plus optional per-route limits. Returns `429` with `X-RateLimit-*` and `Retry-After`. Two backends: in-memory (default) or Redis (`rateLimiter.backend: "redis"`), which shares the budget across instances via one atomic Lua script per check. |
 | Firewall | IP allowlist/blocklist (IPv4/IPv6, CIDR), blocked User-Agent substrings, custom path regexes, and pattern rules for SQL injection, XSS and path traversal on the (up to 3× percent-decoded) URL. Malformed encoding gets `400`. |
 | Client IP | Uses the socket address. `X-Forwarded-For` is only honoured when `server.trustProxy` is `true` (right-most hop), so clients cannot spoof their way around IP rules. |
 | Config | JSON file validated on start (all errors reported at once) and polled for changes; an invalid edit is rejected and the last valid config stays active. |
@@ -97,7 +97,7 @@ if it is not, the admin API returns `500` and does not apply the change.
 | `server.trustProxy` | `false` | Honour `X-Forwarded-For` (only behind your own proxy/LB). |
 | `routes[]` | `[]` | `pathPrefix`, `targets` (http URLs), `balanceStrategy`, `healthCheckPath`, `rateLimit {windowMs, maxRequests}`, `waf` (per-route overrides for `firewall.wafRules`; unset keys inherit the globals). |
 | `firewall` | enabled, all WAF rules on | `ipBlacklist`, `ipWhitelist`, `blockedUserAgents`, `customBlockedPaths` (regex), `wafRules`, `inspectedHeaders` (header names scanned with the WAF signatures, e.g. `["referer"]`). |
-| `rateLimiter` | `60000` ms / `300` | Global per-IP window. |
+| `rateLimiter` | `60000` ms / `300` | Global per-IP window. `backend`: `memory` (default) or `redis`; when `redis`, `redisUrl` is required and `keyPrefix` namespaces the counters (default `gk:rl:`). |
 | `healthCheck` | `10000` / `3000` ms | Probe interval and timeout. |
 
 | Environment variable | Purpose |
@@ -157,6 +157,9 @@ npm run check          # everything above
 ```
 
 - **Unit** (`tests/unit`): config validation, IP parsing, firewall rules, rate-limit windows, load balancer, route matching, metrics.
+- **Redis integration** (`tests/integration/rate-limiter-redis.test.ts`): runs only when
+  `GATEKEEPER_TEST_REDIS_URL` is set; covers the shared budget across two engine
+  instances, route+global windows in one atomic check, and key accounting.
 - **Integration** (`tests/integration`): an in-process `ProxyServer` / `AdminServer` on real sockets against local upstream servers — forwarding, headers, WAF, 429s, 502/504, failover, admin auth and validation.
 - **E2E** (`e2e/`): starts the compiled CLI and the synthetic upstreams as child processes with a temp config and random ports, then uses plain HTTP: routing, firewall, rate limiting, admin blocklist on live traffic, config hot reload (valid and invalid edits), health-check failover, startup failure on bad config, graceful SIGTERM. A Playwright test drives the dashboard in Chromium, including a check that an XSS payload from a blocked request is rendered as text.
 
@@ -169,7 +172,7 @@ CI runs the unit/integration job on Node 20 and 22, the E2E job, `npm audit --au
 - **Not production-hardened.** Throughput was benchmarked once (see [docs/benchmarks.md](docs/benchmarks.md): ~3.3k req/s proxied, ~33k req/s WAF-rejected, on a single process) but it has not been security-audited or soaked.
 - **The WAF is pattern-based** and inspects the URL (path + query) plus only the headers named in `inspectedHeaders` — not
   bodies. It is easy to bypass and can produce false positives; treat it as a demonstration of the technique, not protection.
-- **State is per process and in memory**: rate-limit counters, metrics and events reset on restart and are not shared
+- **State is per process and in memory** unless `rateLimiter.backend` is `redis`: metrics and events still reset on restart and are not shared
   between instances.
 - **HTTP only**: no TLS termination, no HTTPS upstreams, no HTTP/2. WebSocket/`Upgrade` connections are proxied (tunneled after the same firewall → rate-limit → route pipeline).
 - **Hot reload applies routes, firewall and limits**; changing listener ports/hosts requires a restart.
@@ -179,7 +182,6 @@ CI runs the unit/integration job on Node 20 and 22, the E2E job, `npm audit --au
 
 ## Roadmap
 
-- Optional Redis backend for shared rate-limit counters.
 - Higher throughput: keep-alive upstream pooling, body streaming, worker processes (see the measured baseline in docs/benchmarks.md).
 
 ## License

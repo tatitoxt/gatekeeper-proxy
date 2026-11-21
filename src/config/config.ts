@@ -40,6 +40,12 @@ export interface FirewallConfig {
 export interface RateLimiterConfig {
   globalWindowMs: number;
   globalMaxRequests: number;
+  /** Storage backend: per-process memory or shared Redis (multi-instance). Undefined means memory. */
+  backend?: 'memory' | 'redis';
+  /** Redis connection URL, required when backend is 'redis'. */
+  redisUrl?: string;
+  /** Key prefix for rate-limit sorted sets in Redis. */
+  keyPrefix?: string;
 }
 
 export interface HealthCheckConfig {
@@ -100,7 +106,7 @@ export function defaultConfig(): GatekeeperConfig {
       customBlockedPaths: [],
       inspectedHeaders: []
     },
-    rateLimiter: { globalWindowMs: 60000, globalMaxRequests: 300 },
+    rateLimiter: { globalWindowMs: 60000, globalMaxRequests: 300, backend: 'memory' },
     healthCheck: { intervalMs: 10000, timeoutMs: 3000 }
   };
 }
@@ -157,6 +163,16 @@ export function validateConfig(raw: unknown): GatekeeperConfig {
     if (typeof v !== 'string' || v.length === 0) {
       issues.push(`${where}.${key} must be a non-empty string`);
       return fallback;
+    }
+    return v;
+  };
+
+  const optStr = (obj: Obj, key: string, where: string): string | undefined => {
+    const v = obj[key];
+    if (v === undefined) return undefined;
+    if (typeof v !== 'string' || v.length === 0) {
+      issues.push(`${where}.${key} must be a non-empty string when set`);
+      return undefined;
     }
     return v;
   };
@@ -306,9 +322,16 @@ export function validateConfig(raw: unknown): GatekeeperConfig {
   }
 
   const rl = section('rateLimiter');
+  const backendRaw = str(rl, 'backend', 'rateLimiter', 'memory');
+  if (backendRaw !== 'memory' && backendRaw !== 'redis') {
+    issues.push(`rateLimiter.backend must be 'memory' or 'redis'`);
+  }
   const rateLimiter: RateLimiterConfig = {
     globalWindowMs: int(rl, 'globalWindowMs', 'rateLimiter', defaults.rateLimiter.globalWindowMs, 1, 86400000),
-    globalMaxRequests: int(rl, 'globalMaxRequests', 'rateLimiter', defaults.rateLimiter.globalMaxRequests, 1, 10000000)
+    globalMaxRequests: int(rl, 'globalMaxRequests', 'rateLimiter', defaults.rateLimiter.globalMaxRequests, 1, 10000000),
+    backend: backendRaw === 'redis' ? 'redis' : 'memory',
+    redisUrl: optStr(rl, 'redisUrl', 'rateLimiter'),
+    keyPrefix: optStr(rl, 'keyPrefix', 'rateLimiter')
   };
 
   const h = section('healthCheck');
