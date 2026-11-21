@@ -95,7 +95,7 @@ if it is not, the admin API returns `500` and does not apply the change.
 | `server.adminPort` / `server.adminHost` | `8080` / `127.0.0.1` | Admin listener. Non-loopback requires a token. |
 | `server.timeoutMs` | `30000` | Upstream timeout → `504`. |
 | `server.trustProxy` | `false` | Honour `X-Forwarded-For` (only behind your own proxy/LB). |
-| `routes[]` | `[]` | `pathPrefix`, `targets` (http URLs), `balanceStrategy`, `healthCheckPath`, `rateLimit {windowMs, maxRequests}`. |
+| `routes[]` | `[]` | `pathPrefix`, `targets` (http URLs), `balanceStrategy`, `healthCheckPath`, `rateLimit {windowMs, maxRequests}`, `waf` (per-route overrides for `firewall.wafRules`; unset keys inherit the globals). |
 | `firewall` | enabled, all WAF rules on | `ipBlacklist`, `ipWhitelist`, `blockedUserAgents`, `customBlockedPaths` (regex), `wafRules`, `inspectedHeaders` (header names scanned with the WAF signatures, e.g. `["referer"]`). |
 | `rateLimiter` | `60000` ms / `300` | Global per-IP window. |
 | `healthCheck` | `10000` / `3000` ms | Probe interval and timeout. |
@@ -160,7 +160,7 @@ npm run check          # everything above
 - **Integration** (`tests/integration`): an in-process `ProxyServer` / `AdminServer` on real sockets against local upstream servers — forwarding, headers, WAF, 429s, 502/504, failover, admin auth and validation.
 - **E2E** (`e2e/`): starts the compiled CLI and the synthetic upstreams as child processes with a temp config and random ports, then uses plain HTTP: routing, firewall, rate limiting, admin blocklist on live traffic, config hot reload (valid and invalid edits), health-check failover, startup failure on bad config, graceful SIGTERM. A Playwright test drives the dashboard in Chromium, including a check that an XSS payload from a blocked request is rendered as text.
 
-Measured in this repository (Node 22, Linux): 148 Jest unit/integration tests, 17 process-level E2E tests and 1 Playwright
+Measured in this repository (Node 22, Linux): 153 Jest unit/integration tests, 17 process-level E2E tests and 1 Playwright
 test pass; `npm run test:coverage` reports ~94% statement coverage of `src/` (excluding `src/index.ts`, which the E2E suite covers).
 CI runs the unit/integration job on Node 20 and 22, the E2E job, `npm audit --audit-level=high`, and a Docker Compose smoke test.
 
@@ -179,7 +179,6 @@ CI runs the unit/integration job on Node 20 and 22, the E2E job, `npm audit --au
 
 ## Roadmap
 
-- Make WAF rules configurable per route.
 - Optional Redis backend for shared rate-limit counters.
 - WebSocket (`Upgrade`) proxying.
 - Reproducible load test (e.g. autocannon) with results checked into the repo.

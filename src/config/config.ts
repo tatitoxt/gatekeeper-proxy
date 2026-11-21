@@ -10,12 +10,20 @@ export interface RouteRateLimit {
   maxRequests: number;
 }
 
+export interface WafRuleOverrides {
+  blockSqlInjection: boolean;
+  blockXss: boolean;
+  blockPathTraversal: boolean;
+}
+
 export interface RouteConfig {
   pathPrefix: string;
   targets: string[];
   balanceStrategy?: BalanceStrategy;
   healthCheckPath?: string;
   rateLimit?: RouteRateLimit;
+  /** Per-route overrides for firewall.wafRules; unset keys inherit the global flags. */
+  waf?: Partial<WafRuleOverrides>;
 }
 
 export interface FirewallConfig {
@@ -23,11 +31,7 @@ export interface FirewallConfig {
   ipBlacklist: string[];
   ipWhitelist: string[];
   blockedUserAgents: string[];
-  wafRules: {
-    blockSqlInjection: boolean;
-    blockXss: boolean;
-    blockPathTraversal: boolean;
-  };
+  wafRules: WafRuleOverrides;
   customBlockedPaths: string[];
   /** Header names (lowercase) whose values are decoded and scanned with the WAF signatures. */
   inspectedHeaders: string[];
@@ -236,6 +240,30 @@ export function validateConfig(raw: unknown): GatekeeperConfig {
             windowMs: int(r.rateLimit, 'windowMs', `${where}.rateLimit`, 60000, 1, 86400000),
             maxRequests: int(r.rateLimit, 'maxRequests', `${where}.rateLimit`, 100, 1, 1000000)
           };
+        }
+      }
+
+      if (r.waf !== undefined) {
+        if (!isObj(r.waf)) {
+          issues.push(`${where}.waf must be an object`);
+        } else {
+          const known = new Set<string>(['blockSqlInjection', 'blockXss', 'blockPathTraversal']);
+          const waf: Partial<WafRuleOverrides> = {};
+          for (const key of ['blockSqlInjection', 'blockXss', 'blockPathTraversal'] as const) {
+            if (r.waf[key] !== undefined) {
+              if (typeof r.waf[key] !== 'boolean') {
+                issues.push(`${where}.waf.${key} must be a boolean`);
+              } else {
+                waf[key] = r.waf[key];
+              }
+            }
+          }
+          for (const key of Object.keys(r.waf)) {
+            if (!known.has(key)) {
+              issues.push(`${where}.waf has unknown rule "${key}"`);
+            }
+          }
+          if (Object.keys(waf).length > 0) route.waf = waf;
         }
       }
       routes.push(route);

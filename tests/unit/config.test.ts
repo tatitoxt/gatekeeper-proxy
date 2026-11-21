@@ -29,6 +29,13 @@ describe('validateConfig', () => {
     const raw = JSON.parse(fs.readFileSync(path.join(__dirname, '../../gatekeeper.config.json'), 'utf-8'));
     const config = validateConfig(raw);
     expect(config.routes.map((r) => r.pathPrefix)).toEqual(['/api/v1', '/auth']);
+  });
+
+  test('parses per-route waf overrides', () => {
+    const config = validateConfig({
+      routes: [{ pathPrefix: '/api', targets: ['http://a'], waf: { blockSqlInjection: false } }]
+    });
+    expect(config.routes[0].waf).toEqual({ blockSqlInjection: false });
     expect(config.server.adminHost).toBe('127.0.0.1');
   });
 
@@ -50,6 +57,9 @@ describe('validateConfig', () => {
     [{ routes: [{ pathPrefix: '/api', targets: ['https://example.com'] }] }, 'must use http://'],
     [{ routes: [{ pathPrefix: '/api', targets: ['http://a'], balanceStrategy: 'random' }] }, 'balanceStrategy'],
     [{ routes: [{ pathPrefix: '/api', targets: ['http://a'], rateLimit: { windowMs: 0, maxRequests: 1 } }] }, 'rateLimit.windowMs'],
+    [{ routes: [{ pathPrefix: '/api', targets: ['http://a'], waf: 'strict' }] }, 'waf must be an object'],
+    [{ routes: [{ pathPrefix: '/api', targets: ['http://a'], waf: { blockXss: 'yes' } }] }, 'waf.blockXss must be a boolean'],
+    [{ routes: [{ pathPrefix: '/api', targets: ['http://a'], waf: { blockCsrf: true } }] }, 'waf has unknown rule'],
     [{ firewall: { ipBlacklist: ['10.0.0.300'] } }, 'not a valid IP or CIDR'],
     [{ firewall: { ipWhitelist: ['10.0.0.0/33'] } }, 'not a valid IP or CIDR'],
     [{ firewall: { customBlockedPaths: ['(unclosed'] } }, 'not a valid regular expression'],

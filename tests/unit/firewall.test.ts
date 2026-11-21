@@ -127,6 +127,21 @@ describe('FirewallEngine', () => {
     expect(fw.checkRequest(req('/private/x'), CLIENT).allowed).toBe(false);
     expect(fw.checkRequest(req('/.env'), CLIENT).allowed).toBe(true);
   });
+  test('per-route waf overrides relax and tighten signature rules', () => {
+    const engine = new FirewallEngine(baseConfig());
+    const sqli = "/search?q=1%20OR%201%3D1";
+    // Global rules on, override off for this route
+    expect(engine.checkRequest(req(sqli), CLIENT).allowed).toBe(false);
+    expect(engine.checkRequest(req(sqli), CLIENT, { blockSqlInjection: false }).allowed).toBe(true);
+    // Tighten: block path traversal on a route while globals leave it off
+    const lax = baseConfig();
+    lax.wafRules.blockPathTraversal = false;
+    const laxEngine = new FirewallEngine(lax);
+    expect(laxEngine.checkRequest(req('/files/../etc'), CLIENT).allowed).toBe(true);
+    expect(
+      laxEngine.checkRequest(req('/files/../etc'), CLIENT, { blockPathTraversal: true }).allowed
+    ).toBe(false);
+  });
 });
 
 describe('decodeForInspection', () => {

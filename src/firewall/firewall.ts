@@ -1,5 +1,5 @@
 import { IncomingMessage } from 'node:http';
-import { FirewallConfig } from '../config/config.js';
+import { FirewallConfig, WafRuleOverrides } from '../config/config.js';
 import { isIpInRanges } from '../utils/ip-utils.js';
 
 export interface FirewallCheckResult {
@@ -104,10 +104,15 @@ export class FirewallEngine {
     this.compile();
   }
 
-  public checkRequest(req: FirewallRequest, clientIp: string): FirewallCheckResult {
+  public checkRequest(
+    req: FirewallRequest,
+    clientIp: string,
+    wafOverrides?: Partial<WafRuleOverrides>
+  ): FirewallCheckResult {
     if (!this.config.enabled) {
       return { allowed: true };
     }
+    const wafRules: WafRuleOverrides = { ...this.config.wafRules, ...wafOverrides };
 
     // 1. Allowlist: when non-empty, every other IP is rejected.
     if (this.config.ipWhitelist.length > 0 && !isIpInRanges(clientIp, this.config.ipWhitelist)) {
@@ -141,7 +146,7 @@ export class FirewallEngine {
     }
 
     // 5. Signature rules on the decoded URL
-    const urlHit = this.scanValue(decodedUrl);
+    const urlHit = this.scanValue(decodedUrl, wafRules);
     if (urlHit) {
       return { allowed: false, statusCode: 403, reason: urlHit };
     }
@@ -155,7 +160,7 @@ export class FirewallEngine {
         if (decoded === null) {
           return { allowed: false, statusCode: 400, reason: `Malformed encoding in ${name} header` };
         }
-        const hit = this.scanValue(decoded);
+        const hit = this.scanValue(decoded, wafRules);
         if (hit) {
           return { allowed: false, statusCode: 403, reason: `${hit} (in ${name} header)` };
         }
@@ -166,8 +171,7 @@ export class FirewallEngine {
   }
 
   /** Returns the block reason when a decoded value trips a signature, else null. */
-  private scanValue(decoded: string): string | null {
-    const { wafRules } = this.config;
+  private scanValue(decoded: string, wafRules: WafRuleOverrides): string | null {
     if (wafRules.blockPathTraversal && PATH_TRAVERSAL_PATTERN.test(decoded)) {
       return 'WAF: Path Traversal Attack Detected';
     }

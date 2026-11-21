@@ -110,7 +110,9 @@ export class ProxyServer {
     const method = req.method || 'GET';
 
     // 1. Firewall: IP lists, user agents, blocked paths, signature rules
-    const verdict = this.firewall.checkRequest(req, clientIp);
+    //    (the route match runs first so per-route WAF overrides apply)
+    const route = matchRoute(this.config.routes, url);
+    const verdict = this.firewall.checkRequest(req, clientIp, route?.waf);
     if (!verdict.allowed) {
       const status = verdict.statusCode || 403;
       const reason = verdict.reason || 'Blocked by firewall';
@@ -120,8 +122,7 @@ export class ProxyServer {
       return;
     }
 
-    // 2. Route match + rate limit (route window and global per-IP window)
-    const route = matchRoute(this.config.routes, url);
+    // 2. Rate limit (route window and global per-IP window)
     const limit = this.rateLimiter.checkRateLimit(clientIp, route?.pathPrefix, route?.rateLimit);
     const resetSeconds = Math.ceil(limit.resetMs / 1000);
     res.setHeader('X-RateLimit-Limit', limit.limit);
