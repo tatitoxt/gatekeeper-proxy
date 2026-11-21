@@ -107,6 +107,11 @@ export class AdminServer {
       this.json(res, 200, { status: 'ok' });
       return;
     }
+    if (method === 'GET' && pathname === '/metrics') {
+      res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' });
+      res.end(this.metrics.toPrometheus());
+      return;
+    }
 
     if (!pathname.startsWith('/api/')) throw new HttpError(404, 'Not Found');
     this.authorize(req);

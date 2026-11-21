@@ -39,6 +39,20 @@ describe('AdminServer with a token', () => {
     expect((await request(`${base}/api/health`)).json()).toEqual({ status: 'ok' });
   });
 
+  test('GET /metrics returns the Prometheus exposition format', async () => {
+    metrics.recordRequest(200);
+    metrics.recordRequest(503);
+    metrics.recordRateLimitHit('192.0.2.9', '/x', 'GET');
+    const res = await request(`${base}/metrics`);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('text/plain');
+    const body = res.body;
+    expect(body).toContain('gatekeeper_requests_total 2');
+    expect(body).toContain('gatekeeper_responses_total{status="200"} 1');
+    expect(body).toContain('gatekeeper_responses_total{status="503"} 1');
+    expect(body).toContain('gatekeeper_rate_limit_hits_total 1');
+  });
+
   test.each(['/api/metrics', '/api/routes', '/api/firewall/blacklist'])('%s requires the bearer token', async (p) => {
     expect((await request(`${base}${p}`)).status).toBe(401);
     expect((await request(`${base}${p}`, { headers: { authorization: 'Bearer wrong' } })).status).toBe(401);

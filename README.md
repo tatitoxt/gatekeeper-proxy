@@ -67,6 +67,9 @@ for i in $(seq 1 11); do curl -s -o /dev/null -w "%{http_code} " -X POST localho
 curl -s -H "Authorization: Bearer change-me" localhost:8080/api/metrics
 curl -s -X POST -H "Authorization: Bearer change-me" -H "Content-Type: application/json" \
   -d '{"ip":"203.0.113.7"}' localhost:8080/api/firewall/blacklist
+
+# Prometheus scrape endpoint (no token needed; admin listener is loopback-only by default)
+curl -s localhost:8080/metrics
 ```
 
 Open <http://localhost:8080/_admin> and paste the token to see the dashboard.
@@ -178,7 +181,6 @@ CI runs the unit/integration job on Node 20 and 22, the E2E job, `npm audit --au
 
 - Inspect selected request headers in the firewall and make WAF rules configurable per route.
 - Optional Redis backend for shared rate-limit counters.
-- Prometheus-format `/metrics` endpoint.
 - WebSocket (`Upgrade`) proxying.
 - Reproducible load test (e.g. autocannon) with results checked into the repo.
 

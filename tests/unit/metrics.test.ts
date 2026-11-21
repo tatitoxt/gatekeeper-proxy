@@ -36,4 +36,24 @@ describe('MetricsCollector', () => {
     metrics.recordWafBlock('192.0.2.1', '/' + 'x'.repeat(5000), 'GET', 'r');
     expect(metrics.getSummary().recentEvents[0].path.length).toBe(513);
   });
+
+  test('exposes counters in Prometheus text format', () => {
+    let clock = 0;
+    const metrics = new MetricsCollector(100, () => clock);
+    metrics.recordRequest(200);
+    metrics.recordRequest(429);
+    metrics.recordRequest(429);
+    metrics.recordWafBlock('192.0.2.1', '/a', 'GET', 'r');
+    metrics.recordRateLimitHit('192.0.2.2', '/b', 'POST');
+    clock = 5_000;
+    const out = metrics.toPrometheus();
+    expect(out).toContain('gatekeeper_uptime_seconds 5');
+    expect(out).toContain('gatekeeper_requests_total 3');
+    expect(out).toContain('gatekeeper_responses_total{status="200"} 1');
+    expect(out).toContain('gatekeeper_responses_total{status="429"} 2');
+    expect(out).toContain('gatekeeper_waf_blocks_total 1');
+    expect(out).toContain('gatekeeper_rate_limit_hits_total 1');
+    expect(out).toMatch(/# TYPE gatekeeper_requests_total counter/);
+    expect(out.endsWith('\n')).toBe(true);
+  });
 });
