@@ -53,6 +53,8 @@ describe('validateConfig', () => {
     [{ firewall: { ipBlacklist: ['10.0.0.300'] } }, 'not a valid IP or CIDR'],
     [{ firewall: { ipWhitelist: ['10.0.0.0/33'] } }, 'not a valid IP or CIDR'],
     [{ firewall: { customBlockedPaths: ['(unclosed'] } }, 'not a valid regular expression'],
+    [{ firewall: { inspectedHeaders: ['bad header!'] } }, 'not a valid header name'],
+    [{ firewall: { inspectedHeaders: 'referer' } }, 'must be an array of strings'],
     [{ rateLimiter: { globalMaxRequests: -1 } }, 'rateLimiter.globalMaxRequests'],
     [{ healthCheck: { intervalMs: 1 } }, 'healthCheck.intervalMs']
   ])('rejects %j', (raw, expected) => {

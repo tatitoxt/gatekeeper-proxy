@@ -29,6 +29,8 @@ export interface FirewallConfig {
     blockPathTraversal: boolean;
   };
   customBlockedPaths: string[];
+  /** Header names (lowercase) whose values are decoded and scanned with the WAF signatures. */
+  inspectedHeaders: string[];
 }
 
 export interface RateLimiterConfig {
@@ -91,7 +93,8 @@ export function defaultConfig(): GatekeeperConfig {
       ipWhitelist: [],
       blockedUserAgents: [],
       wafRules: { blockSqlInjection: true, blockXss: true, blockPathTraversal: true },
-      customBlockedPaths: []
+      customBlockedPaths: [],
+      inspectedHeaders: []
     },
     rateLimiter: { globalWindowMs: 60000, globalMaxRequests: 300 },
     healthCheck: { intervalMs: 10000, timeoutMs: 3000 }
@@ -252,8 +255,15 @@ export function validateConfig(raw: unknown): GatekeeperConfig {
       blockXss: bool(w, 'blockXss', 'firewall.wafRules', true),
       blockPathTraversal: bool(w, 'blockPathTraversal', 'firewall.wafRules', true)
     },
-    customBlockedPaths: strArray(f, 'customBlockedPaths', 'firewall')
+    customBlockedPaths: strArray(f, 'customBlockedPaths', 'firewall'),
+    inspectedHeaders: strArray(f, 'inspectedHeaders', 'firewall')
   };
+  const headerName = /^[!#$%&'*+\-.^_`|~0-9a-z]+$/i;
+  for (const h of firewall.inspectedHeaders) {
+    if (h.length > 64) issues.push(`firewall.inspectedHeaders: header name exceeds 64 characters`);
+    else if (!headerName.test(h)) issues.push(`firewall.inspectedHeaders: "${h}" is not a valid header name`);
+  }
+  firewall.inspectedHeaders = firewall.inspectedHeaders.map((h) => h.toLowerCase());
   for (const list of ['ipBlacklist', 'ipWhitelist'] as const) {
     for (const entry of firewall[list]) {
       if (!isValidIpOrCidr(entry)) issues.push(`firewall.${list}: "${entry}" is not a valid IP or CIDR`);

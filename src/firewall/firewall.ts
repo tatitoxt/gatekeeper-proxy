@@ -141,18 +141,43 @@ export class FirewallEngine {
     }
 
     // 5. Signature rules on the decoded URL
-    const { wafRules } = this.config;
-    if (wafRules.blockPathTraversal && PATH_TRAVERSAL_PATTERN.test(decodedUrl)) {
-      return { allowed: false, statusCode: 403, reason: 'WAF: Path Traversal Attack Detected' };
+    const urlHit = this.scanValue(decodedUrl);
+    if (urlHit) {
+      return { allowed: false, statusCode: 403, reason: urlHit };
     }
-    if (wafRules.blockSqlInjection && SQL_INJECTION_PATTERNS.some((p) => p.test(decodedUrl))) {
-      return { allowed: false, statusCode: 403, reason: 'WAF: SQL Injection Attack Detected' };
-    }
-    if (wafRules.blockXss && XSS_PATTERNS.some((p) => p.test(decodedUrl))) {
-      return { allowed: false, statusCode: 403, reason: 'WAF: Cross-Site Scripting (XSS) Attack Detected' };
+
+    // 6. Same signatures on the configured headers' decoded values
+    for (const name of this.config.inspectedHeaders) {
+      const raw = req.headers[name];
+      const values = Array.isArray(raw) ? raw : raw === undefined ? [] : [String(raw)];
+      for (const value of values) {
+        const decoded = decodeForInspection(value);
+        if (decoded === null) {
+          return { allowed: false, statusCode: 400, reason: `Malformed encoding in ${name} header` };
+        }
+        const hit = this.scanValue(decoded);
+        if (hit) {
+          return { allowed: false, statusCode: 403, reason: `${hit} (in ${name} header)` };
+        }
+      }
     }
 
     return { allowed: true };
+  }
+
+  /** Returns the block reason when a decoded value trips a signature, else null. */
+  private scanValue(decoded: string): string | null {
+    const { wafRules } = this.config;
+    if (wafRules.blockPathTraversal && PATH_TRAVERSAL_PATTERN.test(decoded)) {
+      return 'WAF: Path Traversal Attack Detected';
+    }
+    if (wafRules.blockSqlInjection && SQL_INJECTION_PATTERNS.some((p) => p.test(decoded))) {
+      return 'WAF: SQL Injection Attack Detected';
+    }
+    if (wafRules.blockXss && XSS_PATTERNS.some((p) => p.test(decoded))) {
+      return 'WAF: Cross-Site Scripting (XSS) Attack Detected';
+    }
+    return null;
   }
 
   private compile(): void {

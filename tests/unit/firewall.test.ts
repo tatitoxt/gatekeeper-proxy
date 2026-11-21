@@ -7,7 +7,8 @@ const baseConfig = (): FirewallConfig => ({
   ipWhitelist: [],
   blockedUserAgents: ['sqlmap'],
   wafRules: { blockSqlInjection: true, blockXss: true, blockPathTraversal: true },
-  customBlockedPaths: ['^/\\.env', '^/wp-login\\.php']
+  customBlockedPaths: ['^/\\.env', '^/wp-login\\.php'],
+  inspectedHeaders: []
 });
 
 const req = (url: string, headers: Record<string, string> = {}): FirewallRequest =>
@@ -34,6 +35,19 @@ describe('FirewallEngine', () => {
     expect(firewall.checkRequest(req('/.env.production'), CLIENT).reason).toContain('Blocked Path Rule');
     expect(firewall.checkRequest(req('/%2eenv'), CLIENT).reason).toContain('Blocked Path Rule');
     expect(firewall.checkRequest(req('/wp-login.php'), CLIENT).allowed).toBe(false);
+  });
+
+  test('scans configured headers with the WAF signatures', () => {
+    const fw = new FirewallEngine({ ...baseConfig(), inspectedHeaders: ['referer', 'x-client'] });
+    expect(fw.checkRequest(req('/api', { referer: 'http://e.test/?q=1%20OR%201%3D1' }), CLIENT)).toMatchObject({
+      allowed: false,
+      statusCode: 403
+    });
+    expect(fw.checkRequest(req('/api', { 'x-client': '<script>alert(1)</script>' }), CLIENT).reason).toContain(
+      'in x-client header'
+    );
+    expect(fw.checkRequest(req('/api', { 'x-other': '<script>alert(1)</script>' }), CLIENT).allowed).toBe(true);
+    expect(fw.checkRequest(req('/api', { referer: 'https://example.com/' }), CLIENT).allowed).toBe(true);
   });
 
   test.each([
