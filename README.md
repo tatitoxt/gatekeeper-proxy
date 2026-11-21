@@ -166,7 +166,7 @@ CI runs the unit/integration job on Node 20 and 22, the E2E job, `npm audit --au
 
 ## Limitations
 
-- **Not production-hardened.** No load testing or benchmarks have been done, and it has not been security-audited.
+- **Not production-hardened.** Throughput was benchmarked once (see [docs/benchmarks.md](docs/benchmarks.md): ~3.3k req/s proxied, ~33k req/s WAF-rejected, on a single process) but it has not been security-audited or soaked.
 - **The WAF is pattern-based** and inspects the URL (path + query) plus only the headers named in `inspectedHeaders` — not
   bodies. It is easy to bypass and can produce false positives; treat it as a demonstration of the technique, not protection.
 - **State is per process and in memory**: rate-limit counters, metrics and events reset on restart and are not shared
@@ -181,7 +181,7 @@ CI runs the unit/integration job on Node 20 and 22, the E2E job, `npm audit --au
 
 - Optional Redis backend for shared rate-limit counters.
 - WebSocket (`Upgrade`) proxying.
-- Reproducible load test (e.g. autocannon) with results checked into the repo.
+- Higher throughput: keep-alive upstream pooling, body streaming, worker processes (see the measured baseline in docs/benchmarks.md).
 
 ## License
 
