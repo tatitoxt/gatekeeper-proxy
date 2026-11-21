@@ -1,5 +1,6 @@
 import http, { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http';
 import { AddressInfo } from 'node:net';
+import { Duplex } from 'node:stream';
 import { GatekeeperConfig, RouteConfig } from '../config/config.js';
 import { FirewallEngine } from '../firewall/firewall.js';
 import { RateLimiterEngine } from '../rate-limiter/rate-limiter.js';
@@ -93,6 +94,17 @@ export class ProxyServer {
     this.rateLimiter.updateGlobalConfig(config.rateLimiter);
     this.loadBalancer.updateRoutes(config.routes);
     this.loadBalancer.updateHealthConfig(config.healthCheck);
+  }
+
+  /** TCP upgrade entry point (WebSocket, CONNECT-style upgrades). Runs the same
+   * firewall/rate-limit/route pipeline as HTTP, then tunnels bytes both ways. */
+  public handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
+    try {
+      this.routeUpgrade(req, socket, head);
+    } catch (err) {
+      logger.error({ err, url: req.url }, 'Unhandled error while processing upgrade');
+      socket.destroy();
+    }
   }
 
   public handleRequest(req: IncomingMessage, res: ServerResponse): void {
@@ -235,6 +247,116 @@ export class ProxyServer {
     req.pipe(proxyReq);
   }
 
+  private routeUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
+    const clientIp = getClientIp(req, this.config.server.trustProxy);
+    const url = req.url || '/';
+    const method = req.method || 'GET';
+
+    const route = matchRoute(this.config.routes, url);
+    const verdict = this.firewall.checkRequest(req, clientIp, route?.waf);
+    if (!verdict.allowed) {
+      const status = verdict.statusCode || 403;
+      this.metrics.recordWafBlock(clientIp, url, method, verdict.reason || 'Blocked by firewall');
+      logger.warn({ clientIp, url, reason: verdict.reason }, 'Upgrade blocked by firewall');
+      this.rejectUpgrade(socket, status);
+      return;
+    }
+
+    const limit = this.rateLimiter.checkRateLimit(clientIp, route?.pathPrefix, route?.rateLimit);
+    if (!limit.allowed) {
+      this.metrics.recordRateLimitHit(clientIp, url, method);
+      this.rejectUpgrade(socket, 429);
+      return;
+    }
+
+    if (!route) {
+      this.rejectUpgrade(socket, 404);
+      return;
+    }
+    const target = this.loadBalancer.selectTarget(route);
+    if (!target) {
+      this.rejectUpgrade(socket, 503);
+      return;
+    }
+    this.forwardUpgrade(req, socket, head, target, route);
+  }
+
+  /** Writes a bare HTTP error on a raw socket, used before any 101 is sent. */
+  private rejectUpgrade(socket: Duplex, status: number): void {
+    this.metrics.recordRequest(status);
+    const label = STATUS_LABELS[status] || 'Error';
+    socket.end(`HTTP/1.1 ${status} ${label}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  }
+
+  private forwardUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, target: string, route: RouteConfig): void {
+    const targetUrl = new URL(req.url || '/', target);
+    const peerIp = normalizeIp(req.socket.remoteAddress || '');
+    const incoming = stripHopByHop(req.headers);
+    const headers: IncomingHttpHeaders = {
+      ...incoming,
+      // upgrade/connection were stripped above; the upstream needs them.
+      connection: 'Upgrade',
+      upgrade: req.headers.upgrade || 'websocket',
+      host: targetUrl.host,
+      'x-forwarded-for': peerIp,
+      'x-forwarded-host': req.headers.host,
+      'x-real-ip': normalizeIp(req.socket.remoteAddress || ''),
+      'x-gatekeeper-proxy': '1.0'
+    };
+
+    let released = false;
+    const release = () => {
+      if (!released) {
+        released = true;
+        this.loadBalancer.decrementConnection(route.pathPrefix, target);
+      }
+    };
+    this.loadBalancer.incrementConnection(route.pathPrefix, target);
+
+    const proxyReq = http.request({
+      hostname: targetUrl.hostname,
+      port: targetUrl.port || 80,
+      path: targetUrl.pathname + targetUrl.search,
+      method: req.method,
+      headers
+    });
+
+    proxyReq.on('upgrade', (proxyRes, proxySocket) => {
+      // Relay the upstream 101 verbatim, then tunnel bytes both directions.
+      const lines = [`HTTP/1.1 ${proxyRes.statusCode} ${proxyRes.statusMessage}`];
+      for (let i = 0; i < proxyRes.rawHeaders.length; i += 2) {
+        lines.push(`${proxyRes.rawHeaders[i]}: ${proxyRes.rawHeaders[i + 1]}`);
+      }
+      socket.write(`${lines.join('\r\n')}\r\n\r\n`);
+      if (head.length > 0) proxySocket.write(head);
+      proxySocket.pipe(socket);
+      socket.pipe(proxySocket);
+      proxySocket.on('close', () => { release(); socket.destroy(); });
+      proxySocket.on('error', () => { release(); socket.destroy(); });
+      socket.on('close', release);
+      socket.on('error', () => { release(); proxySocket.destroy(); });
+    });
+
+    proxyReq.on('response', (proxyRes) => {
+      // Upstream refused the upgrade with a plain HTTP response: forward it.
+      const lines = [`HTTP/1.1 ${proxyRes.statusCode} ${proxyRes.statusMessage}`];
+      for (let i = 0; i < proxyRes.rawHeaders.length; i += 2) {
+        lines.push(`${proxyRes.rawHeaders[i]}: ${proxyRes.rawHeaders[i + 1]}`);
+      }
+      socket.write(`${lines.join('\r\n')}\r\n\r\n`);
+      proxyRes.pipe(socket);
+      proxyRes.on('end', release);
+    });
+
+    proxyReq.on('error', () => {
+      release();
+      this.loadBalancer.reportFailure(route.pathPrefix, target);
+      socket.destroy();
+    });
+    socket.on('close', () => { proxyReq.destroy(); release(); });
+    proxyReq.end();
+  }
+
   private sendError(res: ServerResponse, status: number, message: string, extra: Record<string, unknown> = {}): void {
     this.metrics.recordRequest(status);
     if (res.headersSent) {
@@ -248,6 +370,7 @@ export class ProxyServer {
   public start(): Promise<AddressInfo> {
     return new Promise((resolve, reject) => {
       const server = http.createServer((req, res) => this.handleRequest(req, res));
+      server.on('upgrade', (req, socket, head) => this.handleUpgrade(req, socket, head));
       server.on('clientError', (_err, socket) => {
         if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
       });

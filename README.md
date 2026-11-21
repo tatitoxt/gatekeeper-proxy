@@ -171,7 +171,7 @@ CI runs the unit/integration job on Node 20 and 22, the E2E job, `npm audit --au
   bodies. It is easy to bypass and can produce false positives; treat it as a demonstration of the technique, not protection.
 - **State is per process and in memory**: rate-limit counters, metrics and events reset on restart and are not shared
   between instances.
-- **HTTP only**: no TLS termination, no HTTPS upstreams, no WebSocket/`Upgrade` proxying, no HTTP/2.
+- **HTTP only**: no TLS termination, no HTTPS upstreams, no HTTP/2. WebSocket/`Upgrade` connections are proxied (tunneled after the same firewall → rate-limit → route pipeline).
 - **Hot reload applies routes, firewall and limits**; changing listener ports/hosts requires a restart.
 - The admin API uses a single static bearer token; there are no users, roles or audit log.
 - `npm audit` reports moderate findings in dev-only tooling (`minimatch` via `eslint`/`typescript-eslint`); the fixed `minimatch`
@@ -180,7 +180,6 @@ CI runs the unit/integration job on Node 20 and 22, the E2E job, `npm audit --au
 ## Roadmap
 
 - Optional Redis backend for shared rate-limit counters.
-- WebSocket (`Upgrade`) proxying.
 - Higher throughput: keep-alive upstream pooling, body streaming, worker processes (see the measured baseline in docs/benchmarks.md).
 
 ## License
