@@ -236,3 +236,47 @@ describe('ProxyServer health-based failover', () => {
     }
   });
 });
+
+describe('ProxyServer upstream keep-alive pooling', () => {
+  const poolConfig = (target: string, keepAlive: boolean): GatekeeperConfig =>
+    makeConfig({
+      routes: [{ pathPrefix: '/', targets: [target] }],
+      upstream: { keepAlive, maxSockets: 8, maxFreeSockets: 8 }
+    });
+
+  async function hit(base: string, n: number): Promise<void> {
+    for (let i = 0; i < n; i += 1) await request(`${base}/ping`);
+  }
+
+  test('reuses the upstream socket across sequential requests', async () => {
+    const remotePorts: number[] = [];
+    const up = await startUpstream('ka', (req, res) => {
+      remotePorts.push(req.socket.remotePort ?? -1);
+      res.writeHead(200);
+      res.end('ok');
+    });
+    const p = new ProxyServer(poolConfig(up.url, true));
+    const addr = (await p.start()) as AddressInfo;
+    await hit(`http://127.0.0.1:${addr.port}`, 4);
+    await p.stop();
+    await up.close();
+    expect(remotePorts).toHaveLength(4);
+    expect(new Set(remotePorts).size).toBe(1);
+  });
+
+  test('opens a fresh socket per request with keepAlive off', async () => {
+    const remotePorts: number[] = [];
+    const up = await startUpstream('ka', (req, res) => {
+      remotePorts.push(req.socket.remotePort ?? -1);
+      res.writeHead(200);
+      res.end('ok');
+    });
+    const p = new ProxyServer(poolConfig(up.url, false));
+    const addr = (await p.start()) as AddressInfo;
+    await hit(`http://127.0.0.1:${addr.port}`, 4);
+    await p.stop();
+    await up.close();
+    expect(remotePorts).toHaveLength(4);
+    expect(new Set(remotePorts).size).toBe(4);
+  });
+});

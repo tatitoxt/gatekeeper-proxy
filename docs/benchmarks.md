@@ -20,23 +20,24 @@ BENCH_DURATION_S=30 BENCH_CONNECTIONS=200 npm run bench
   limiter stays out of the measurement
 - Machine: Linux VM, x86-64, Node 22, loopback only (no network stack effects)
 
-**Results (2026-11-21)**
+**Results (2026-11-21)** — two runs shown; absolute req/s moves with machine
+load, so the baseline is reported as a range:
 
-| Scenario | req/s | p50 | p99 | Throughput | non-2xx |
-|---|---:|---:|---:|---:|---:|
-| Upstream direct (no proxy) | 53,926 | 0 ms | 3 ms | 17.69 MB/s | 0 |
-| Through Gatekeeper (routing + WAF) | 3,315 | 12 ms | 45 ms | 1.43 MB/s | 0 |
-| Through Gatekeeper (SQLi payload → 403) | 33,145 | 1 ms | 11 ms | 8.68 MB/s | 331,438 |
+| Scenario | req/s | p50 | p99 |
+|---|---:|---:|---:|
+| Upstream direct (no proxy) | 26,864–53,926 | 0 ms | 3–17 ms |
+| Through Gatekeeper (routing + WAF + keep-alive pooling) | 2,758–3,315 | 13 ms | 45–69 ms |
+| Through Gatekeeper (SQLi payload → 403) | 21,704–33,145 | 1 ms | 11–21 ms |
 
 **Reading the numbers**
 
-- The proxy sustains ~3.3k req/s of full request/response forwarding with
-  routing, load-balancing and WAF inspection on the hot path — about 6% of the
-  raw upstream. That's the honest cost of a single-process Node proxy; it is
-  the number to improve (keep-alive agent pooling, streaming bodies, worker
-  processes).
+- The proxy sustains ~3k req/s of full request/response forwarding with
+  routing, load-balancing, WAF inspection and pooled keep-alive upstream
+  connections on the hot path — about 10% of the raw upstream. That's the
+  honest cost of a single-process Node proxy; the remaining headroom is
+  streaming bodies and worker processes.
 - Blocked requests are ~10× cheaper: the WAF rejects the SQLi probe before any
-  upstream connection is made, at ~33k req/s. Attack traffic is absorbed at the
-  edge without spending upstream capacity.
+  upstream connection is made, at ~22–33k req/s. Attack traffic is absorbed at
+  the edge without spending upstream capacity.
 - No tuning was applied; numbers are out-of-the-box and machine-dependent.
   They are reported as a reproducible baseline, not a marketing figure.

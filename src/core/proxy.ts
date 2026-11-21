@@ -68,6 +68,7 @@ export class ProxyServer {
   private loadBalancer: LoadBalancer;
   private readonly metrics: MetricsCollector;
   private server: http.Server | null = null;
+  private upstreamAgent: http.Agent;
 
   constructor(config: GatekeeperConfig, metrics: MetricsCollector = new MetricsCollector()) {
     this.config = config;
@@ -75,6 +76,16 @@ export class ProxyServer {
     this.firewall = new FirewallEngine(config.firewall);
     this.rateLimiter = new RateLimiterEngine(config.rateLimiter);
     this.loadBalancer = new LoadBalancer(config.routes, config.healthCheck);
+    this.upstreamAgent = ProxyServer.buildAgent(config);
+  }
+
+  private static buildAgent(config: GatekeeperConfig): http.Agent {
+    const u = config.upstream;
+    return new http.Agent({
+      keepAlive: u.keepAlive,
+      maxSockets: u.maxSockets,
+      maxFreeSockets: u.maxFreeSockets
+    });
   }
 
   public getMetrics(): MetricsCollector {
@@ -94,6 +105,11 @@ export class ProxyServer {
     this.rateLimiter.updateGlobalConfig(config.rateLimiter);
     this.loadBalancer.updateRoutes(config.routes);
     this.loadBalancer.updateHealthConfig(config.healthCheck);
+    if (config.upstream !== this.config.upstream) {
+      const old = this.upstreamAgent;
+      this.upstreamAgent = ProxyServer.buildAgent(config);
+      old.destroy();
+    }
   }
 
   /** TCP upgrade entry point (WebSocket, CONNECT-style upgrades). Runs the same
@@ -194,6 +210,7 @@ export class ProxyServer {
 
     let timedOut = false;
     const proxyReq = http.request({
+      agent: this.upstreamAgent,
       hostname: targetUrl.hostname,
       port: targetUrl.port || 80,
       path: targetUrl.pathname + targetUrl.search,
@@ -310,6 +327,7 @@ export class ProxyServer {
     this.loadBalancer.incrementConnection(route.pathPrefix, target);
 
     const proxyReq = http.request({
+      agent: this.upstreamAgent,
       hostname: targetUrl.hostname,
       port: targetUrl.port || 80,
       path: targetUrl.pathname + targetUrl.search,
@@ -396,5 +414,6 @@ export class ProxyServer {
       setTimeout(() => server.closeAllConnections(), 5000).unref();
     });
     await closeLimiter;
+    this.upstreamAgent.destroy();
   }
 }

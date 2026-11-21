@@ -57,7 +57,8 @@ export function makeConfig(overrides: Partial<GatekeeperConfig> = {}): Gatekeepe
     server: { ...base.server, port: 0, adminPort: 0, host: '127.0.0.1', ...(overrides.server ?? {}) },
     firewall: { ...base.firewall, ...(overrides.firewall ?? {}) },
     rateLimiter: { ...base.rateLimiter, ...(overrides.rateLimiter ?? {}) },
-    healthCheck: { ...base.healthCheck, ...(overrides.healthCheck ?? {}) }
+    healthCheck: { ...base.healthCheck, ...(overrides.healthCheck ?? {}) },
+    upstream: { ...base.upstream, ...(overrides.upstream ?? {}) }
   };
 }
 

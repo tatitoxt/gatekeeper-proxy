@@ -64,12 +64,22 @@ export interface ServerConfig {
   trustProxy: boolean;
 }
 
+export interface UpstreamConfig {
+  /** Pool upstream TCP connections (HTTP keep-alive). */
+  keepAlive: boolean;
+  /** Max concurrent sockets per upstream host. */
+  maxSockets: number;
+  /** Idle pooled sockets kept for reuse. */
+  maxFreeSockets: number;
+}
+
 export interface GatekeeperConfig {
   server: ServerConfig;
   routes: RouteConfig[];
   firewall: FirewallConfig;
   rateLimiter: RateLimiterConfig;
   healthCheck: HealthCheckConfig;
+  upstream: UpstreamConfig;
 }
 
 export class ConfigPersistError extends Error {
@@ -107,7 +117,8 @@ export function defaultConfig(): GatekeeperConfig {
       inspectedHeaders: []
     },
     rateLimiter: { globalWindowMs: 60000, globalMaxRequests: 300, backend: 'memory' },
-    healthCheck: { intervalMs: 10000, timeoutMs: 3000 }
+    healthCheck: { intervalMs: 10000, timeoutMs: 3000 },
+    upstream: { keepAlive: true, maxSockets: 256, maxFreeSockets: 64 }
   };
 }
 
@@ -199,6 +210,13 @@ export function validateConfig(raw: unknown): GatekeeperConfig {
   if (server.port !== 0 && server.port === server.adminPort && server.host === server.adminHost) {
     issues.push('server.port and server.adminPort must differ');
   }
+
+  const u = section('upstream');
+  const upstream: UpstreamConfig = {
+    keepAlive: bool(u, 'keepAlive', 'upstream', defaults.upstream.keepAlive),
+    maxSockets: int(u, 'maxSockets', 'upstream', defaults.upstream.maxSockets, 1, 65535),
+    maxFreeSockets: int(u, 'maxFreeSockets', 'upstream', defaults.upstream.maxFreeSockets, 0, 65535)
+  };
 
   const routes: RouteConfig[] = [];
   const rawRoutes = raw.routes ?? [];
@@ -341,7 +359,7 @@ export function validateConfig(raw: unknown): GatekeeperConfig {
   };
 
   if (issues.length > 0) throw new ConfigValidationError(issues);
-  return { server, routes, firewall, rateLimiter, healthCheck };
+  return { server, routes, firewall, rateLimiter, healthCheck, upstream };
 }
 
 export interface ConfigManagerOptions {
