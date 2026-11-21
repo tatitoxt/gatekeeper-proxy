@@ -73,6 +73,15 @@ export interface UpstreamConfig {
   maxFreeSockets: number;
 }
 
+export interface ClusterConfig {
+  /**
+   * Proxy worker processes sharing the listener via node:cluster. 1 keeps the
+   * single-process layout (proxy + admin in one process); >1 forks workers
+   * that serve the proxy port while the primary owns the admin server.
+   */
+  workers: number;
+}
+
 export interface GatekeeperConfig {
   server: ServerConfig;
   routes: RouteConfig[];
@@ -80,6 +89,7 @@ export interface GatekeeperConfig {
   rateLimiter: RateLimiterConfig;
   healthCheck: HealthCheckConfig;
   upstream: UpstreamConfig;
+  cluster: ClusterConfig;
 }
 
 export class ConfigPersistError extends Error {
@@ -118,7 +128,8 @@ export function defaultConfig(): GatekeeperConfig {
     },
     rateLimiter: { globalWindowMs: 60000, globalMaxRequests: 300, backend: 'memory' },
     healthCheck: { intervalMs: 10000, timeoutMs: 3000 },
-    upstream: { keepAlive: true, maxSockets: 256, maxFreeSockets: 64 }
+    upstream: { keepAlive: true, maxSockets: 256, maxFreeSockets: 64 },
+    cluster: { workers: 1 }
   };
 }
 
@@ -210,6 +221,11 @@ export function validateConfig(raw: unknown): GatekeeperConfig {
   if (server.port !== 0 && server.port === server.adminPort && server.host === server.adminHost) {
     issues.push('server.port and server.adminPort must differ');
   }
+
+  const cl = section('cluster');
+  const cluster: ClusterConfig = {
+    workers: int(cl, 'workers', 'cluster', defaults.cluster.workers, 1, 64)
+  };
 
   const u = section('upstream');
   const upstream: UpstreamConfig = {
@@ -359,7 +375,7 @@ export function validateConfig(raw: unknown): GatekeeperConfig {
   };
 
   if (issues.length > 0) throw new ConfigValidationError(issues);
-  return { server, routes, firewall, rateLimiter, healthCheck, upstream };
+  return { server, routes, firewall, rateLimiter, healthCheck, upstream, cluster };
 }
 
 export interface ConfigManagerOptions {

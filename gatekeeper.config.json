@@ -62,5 +62,8 @@
   "healthCheck": {
     "intervalMs": 10000,
     "timeoutMs": 3000
+  },
+  "cluster": {
+    "workers": 1
   }
 }

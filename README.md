@@ -24,6 +24,7 @@ trust boundaries) are visible and tested.
 | --- | --- |
 | Routing | Longest path-prefix match on whole segments (`/api` matches `/api/x`, not `/apiary`); unmatched paths get `404`. |
 | Load balancing | `round-robin` or `least-connections` per route. |
+| Clustering | `cluster.workers: N` forks N proxy workers sharing the listener via `node:cluster` (respawned on exit); the primary owns the admin API alone. Pair with the Redis backend for a shared rate-limit budget across workers. |
 | Health checks | Routes with `healthCheckPath` are probed every `healthCheck.intervalMs`; failing targets (or ones that refuse connections) leave rotation until a probe succeeds, and `503` is returned when none are left. |
 | Proxying | Streams bodies both ways over pooled keep-alive upstream connections (`upstream.keepAlive`/`maxSockets`/`maxFreeSockets`), sets `X-Forwarded-For/-Host/-Proto` and `X-Real-IP`, strips hop-by-hop headers, `502` on upstream errors and `504` after `server.timeoutMs`. |
 | Rate limiting | Sliding window per client IP: a global limit plus optional per-route limits. Returns `429` with `X-RateLimit-*` and `Retry-After`. Two backends: in-memory (default) or Redis (`rateLimiter.backend: "redis"`), which shares the budget across instances via one atomic Lua script per check. |
@@ -182,7 +183,7 @@ CI runs the unit/integration job on Node 20 and 22, the E2E job, `npm audit --au
 
 ## Roadmap
 
-- Higher throughput: streaming bodies and worker processes (see the measured baseline in docs/benchmarks.md).
+- Streaming request/response bodies for very large payloads (see the measured baseline in docs/benchmarks.md).
 
 ## License
 
