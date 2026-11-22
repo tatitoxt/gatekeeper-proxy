@@ -1,4 +1,5 @@
 import { RateLimiterEngine } from '../../src/rate-limiter/rate-limiter.js';
+import { RedisRateLimitStore } from '../../src/rate-limiter/redis-store.js';
 import type { RateLimiterConfig } from '../../src/config/config.js';
 
 const REDIS_URL = process.env.GATEKEEPER_TEST_REDIS_URL;
@@ -63,4 +64,46 @@ describeRedis('RateLimiterEngine (Redis backend)', () => {
     await limiter.checkRateLimit('192.0.2.14');
     expect(await limiter.trackedKeys()).toBe(3);
   });
+
+  test('simultaneous requests on different instances at the same ms are both counted', async () => {
+    // Two engines sharing a fixed clock hit the member-collision case: each
+    // request must still occupy its own ZSET member.
+    const sameNow = () => 1_700_000_000_000;
+    const a = new RateLimiterEngine(sharedCfg, sameNow);
+    const b = new RateLimiterEngine(sharedCfg, sameNow);
+    limiter = a;
+    try {
+      const [ra, rb] = await Promise.all([
+        a.checkRateLimit('192.0.2.15'),
+        b.checkRateLimit('192.0.2.15')
+      ]);
+      expect(ra.allowed && rb.allowed).toBe(true);
+      // Budget is 3; a collision would leave a third slot free — it must not.
+      const third = await a.checkRateLimit('192.0.2.15');
+      const fourth = await b.checkRateLimit('192.0.2.15');
+      expect([third.allowed, fourth.allowed]).toEqual([true, false]);
+    } finally {
+      await b.close();
+    }
+  });
+
+  test('allowed requests report a real X-RateLimit-Reset window', async () => {
+    limiter = new RateLimiterEngine(cfg({ globalMaxRequests: 1 }));
+    const allowed = await limiter.checkRateLimit('192.0.2.16');
+    expect(allowed.allowed).toBe(true);
+    expect(allowed.resetMs).toBeGreaterThan(0);
+    expect(allowed.resetMs).toBeLessThanOrEqual(60_000);
+  });
+});
+
+// Runs without a Redis server: a dead endpoint must degrade, not hang.
+describe('RedisRateLimitStore outage', () => {
+  test('check fails open after the deadline instead of hanging', async () => {
+    const store = new RedisRateLimitStore('redis://127.0.0.1:6390', 'gk:test:dead:');
+    const start = Date.now();
+    const result = await store.check('192.0.2.99', null, { windowMs: 60_000, maxRequests: 5 }, Date.now());
+    expect(Date.now() - start).toBeLessThan(10_000);
+    expect(result.allowed).toBe(true);
+    await store.close();
+  }, 15_000);
 });

@@ -1,6 +1,6 @@
 import http from 'node:http';
 import http2 from 'node:http2';
-import { AddressInfo } from 'node:net';
+import net, { AddressInfo } from 'node:net';
 import { ProxyServer } from '../../src/core/proxy.js';
 import { makeConfig } from '../helpers.js';
 
@@ -58,10 +58,10 @@ function startH2Upstream(name: string): Promise<H2Upstream> {
 
 function h1Request(
   url: string,
-  opts: { method?: string; body?: string } = {}
+  opts: { method?: string; body?: string; headers?: http.OutgoingHttpHeaders } = {}
 ): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
   return new Promise((resolve, reject) => {
-    const req = http.request(url, { method: opts.method || 'GET' }, (res) => {
+    const req = http.request(url, { method: opts.method || 'GET', headers: opts.headers }, (res) => {
       let body = '';
       res.on('data', (c) => (body += c));
       res.on('end', () => resolve({ status: res.statusCode || 0, headers: res.headers, body }));
@@ -145,4 +145,54 @@ describe('HTTP/2 upstreams (route.upstreamHttp2)', () => {
 
     await proxy.stop();
   });
+
+  it('forwards a GET body to the h2 upstream instead of erroring', async () => {
+    const upstream = await startH2Upstream('h2-target');
+    const proxy = new ProxyServer(makeConfig({ routes: h2Route(upstream.port) }));
+    const address = await proxy.start();
+
+    // A GET body is unusual but legal when chunked-framed (Content-Length on
+    // GET is rejected by Node's parser itself; a bare body is unframed junk).
+    const chunkLen = 'get-body-payload'.length.toString(16);
+    const response = await new Promise<string>((resolve, reject) => {
+      const socket = net.connect(address.port, '127.0.0.1', () => {
+        socket.write(
+          'GET /echo HTTP/1.1\r\nHost: gatekeeper\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n' +
+            `${chunkLen}\r\nget-body-payload\r\n0\r\n\r\n`
+        );
+      });
+      let data = '';
+      socket.on('data', (d) => (data += d.toString()));
+      socket.on('end', () => resolve(data));
+      socket.on('error', reject);
+    });
+
+    // Response is chunked-framed: headers, hex length lines, then the JSON.
+    expect(response).toMatch(/^HTTP\/1\.1 200/);
+    const payload = JSON.parse(response.match(/\{.*\}/s)![0]);
+    expect(payload.body).toBe('get-body-payload');
+
+    await proxy.stop();
+    await upstream.close();
+  });
+
+  it('returns 504 when the h2 upstream accepts the stream but never responds', async () => {
+    const server = http2.createServer();
+    server.on('stream', () => {
+      /* accepted, never answered */
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const { port } = server.address() as AddressInfo;
+    const cfg = makeConfig({ routes: h2Route(port) });
+    cfg.server.timeoutMs = 200;
+    const proxy = new ProxyServer(cfg);
+    const address = await proxy.start();
+
+    const res = await h1Request(`http://127.0.0.1:${address.port}/echo`);
+    expect(res.status).toBe(504);
+
+    await proxy.stop();
+    await new Promise<void>((done) => server.close(() => done()));
+  });
+
 });

@@ -1,4 +1,4 @@
-import { matchRoute, stripHopByHop } from '../../src/core/proxy.js';
+import { matchRoute, normalizedRequestPath, stripHopByHop } from '../../src/core/proxy.js';
 import { RouteConfig } from '../../src/config/config.js';
 
 const routes: RouteConfig[] = [
@@ -45,5 +45,28 @@ describe('stripHopByHop', () => {
         'x-request-id': 'abc'
       })
     ).toEqual({ 'content-type': 'application/json', 'x-request-id': 'abc' });
+  });
+});
+
+describe('normalizedRequestPath', () => {
+  test('resolves dot segments so a weaker route cannot be smuggled past a stricter one', () => {
+    expect(normalizedRequestPath('/api/./admin?id=1')).toBe('/api/admin?id=1');
+    expect(normalizedRequestPath('/api/../auth')).toBe('/auth');
+    const routes = [
+      { pathPrefix: '/api', targets: ['http://a:1'], waf: { blockSqlInjection: false } },
+      { pathPrefix: '/api/admin', targets: ['http://a:1'], waf: { blockSqlInjection: true } }
+    ] as never[];
+    expect(matchRoute(routes, normalizedRequestPath('/api/./admin'))).toBe(routes[1]);
+  });
+
+  test('drops absolute and scheme-relative authorities, keeping only path and query', () => {
+    expect(normalizedRequestPath('http://internal.evil:9/admin')).toBe('/admin');
+    expect(normalizedRequestPath('//internal.evil:9/admin?x=1')).toBe('/admin?x=1');
+  });
+
+  test('falls back to the raw value only when URL parsing fails', () => {
+    expect(normalizedRequestPath('http://[')).toBe('http://[');
+    // A bare relative string parses as a path and gains a leading slash.
+    expect(normalizedRequestPath('%%%')).toBe('/%%%');
   });
 });

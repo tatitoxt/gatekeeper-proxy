@@ -103,6 +103,17 @@ describe('ProxyServer (in-process, real sockets)', () => {
     expect(res.headers['x-ratelimit-limit']).toBe('1000');
   });
 
+  test('hot reload applies upstream pool changes without a restart', async () => {
+    const agentBefore = (proxy as unknown as { upstreamAgent: object }).upstreamAgent;
+    const next = config();
+    next.upstream = { ...next.upstream, maxSockets: 7 };
+    proxy.updateConfig(next);
+    const agentAfter = (proxy as unknown as { upstreamAgent: object }).upstreamAgent;
+    expect(agentAfter).not.toBe(agentBefore);
+    const res = await request(`${base}/api/x`);
+    expect(res.status).toBe(200);
+  });
+
   test('blocks firewall violations before they reach the upstream', async () => {
     const before = a.requests.length + b.requests.length;
     const results = await Promise.all([

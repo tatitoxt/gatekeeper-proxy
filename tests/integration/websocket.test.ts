@@ -1,4 +1,4 @@
-import { AddressInfo } from 'node:net';
+import net, { AddressInfo } from 'node:net';
 import { WebSocketServer, WebSocket } from 'ws';
 import { ProxyServer } from '../../src/core/proxy.js';
 import { makeConfig } from '../helpers.js';
@@ -72,5 +72,28 @@ describe('WebSocket proxying', () => {
     });
     expect(code).toBe('404');
     ws.terminate();
+  });
+
+  it('ignores an absolute-form request target and still upgrades only the configured upstream', async () => {
+    // SSRF probe: the request line points at a dead port; the upgrade must still
+    // reach the configured upstream, not the client-supplied authority.
+    const statusLine = await new Promise<string>((resolve, reject) => {
+      const socket = net.connect(proxyPort, '127.0.0.1', () => {
+        socket.write(
+          `GET http://127.0.0.1:9/ws HTTP/1.1\r\nHost: attacker\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`
+        );
+      });
+      let data = '';
+      socket.on('data', (d) => {
+        data += d.toString();
+        if (data.includes('\r\n\r\n')) {
+          socket.destroy();
+          resolve(data.split('\r\n')[0]);
+        }
+      });
+      socket.on('error', reject);
+      socket.setTimeout(5000, () => reject(new Error(`timed out, got: ${data}`)));
+    });
+    expect(statusLine).toContain('101');
   });
 });

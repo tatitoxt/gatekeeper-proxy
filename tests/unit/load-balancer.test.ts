@@ -53,8 +53,8 @@ describe('LoadBalancer', () => {
     lb.reportFailure('/api', 'http://a:1');
     lb.updateRoutes([{ ...r, targets: ['http://a:1', 'http://d:4'] }]);
     expect(lb.getTargetStates('/api')).toEqual([
-      { url: 'http://a:1', isHealthy: false, activeConnections: 0, consecutiveFailures: 1, openUntil: null },
-      { url: 'http://d:4', isHealthy: true, activeConnections: 0, consecutiveFailures: 0, openUntil: null }
+      { url: 'http://a:1', isHealthy: false, activeConnections: 0, consecutiveFailures: 1, openUntil: null, halfOpen: false },
+      { url: 'http://d:4', isHealthy: true, activeConnections: 0, consecutiveFailures: 0, openUntil: null, halfOpen: false }
     ]);
     expect(lb.getTargetStates('/old')).toEqual([]);
   });
@@ -105,6 +105,24 @@ describe('LoadBalancer', () => {
       lb.reportSuccess('/api', 'http://a:1');
       expect(lb.getTargetStates('/api')[0]).toMatchObject({ isHealthy: true, consecutiveFailures: 0, openUntil: null });
     });
+  });
+
+  test('an open breaker admits only one half-open trial request at a time', () => {
+    const r = route({ targets: ['http://a:1', 'http://b:1'] });
+    const lb = new LoadBalancer([r], undefined, { failureThreshold: 1, openMs: 0 });
+    lb.reportFailure('/api', 'http://a:1');
+    // Cooldown elapsed (openMs: 0): first select is the trial, further calls use others.
+    expect(lb.selectTarget(r)).toBe('http://a:1');
+    expect(lb.getTargetStates('/api')[0].halfOpen).toBe(true);
+    // Concurrent callers are routed to other targets until the trial resolves.
+    expect(lb.selectTarget(r)).toBe('http://b:1');
+    // Trial failed: breaker reopens (and a 0ms cooldown arms the next trial).
+    lb.reportFailure('/api', 'http://a:1');
+    expect(lb.getTargetStates('/api')[0].halfOpen).toBe(false);
+    expect(lb.selectTarget(r)).toBe('http://a:1');
+    // Trial succeeded: breaker closes for good.
+    lb.reportSuccess('/api', 'http://a:1');
+    expect(lb.getTargetStates('/api')[0]).toMatchObject({ halfOpen: false, openUntil: null, consecutiveFailures: 0 });
   });
 
   test('removing healthCheckPath puts previously failed targets back in rotation', () => {
