@@ -53,6 +53,17 @@ export interface HealthCheckConfig {
   timeoutMs: number;
 }
 
+export interface TlsConfig {
+  /** PEM certificate chain for the proxy listener. */
+  certFile: string;
+  /** PEM private key for the certificate. */
+  keyFile: string;
+  /** Optional CA bundle used to verify client certificates (mTLS). */
+  caFile?: string;
+  /** Request (and require, with caFile) a client certificate. */
+  requestCert: boolean;
+}
+
 export interface ServerConfig {
   port: number;
   adminPort: number;
@@ -62,6 +73,8 @@ export interface ServerConfig {
   timeoutMs: number;
   /** Trust X-Forwarded-For from exactly one proxy hop in front of Gatekeeper. */
   trustProxy: boolean;
+  /** When set, the proxy listener serves HTTPS instead of HTTP. Paths resolve from the working directory. */
+  tls?: TlsConfig;
 }
 
 export interface UpstreamConfig {
@@ -114,7 +127,8 @@ export function defaultConfig(): GatekeeperConfig {
       host: '0.0.0.0',
       adminHost: '127.0.0.1',
       timeoutMs: 30000,
-      trustProxy: false
+      trustProxy: false,
+      tls: undefined
     },
     routes: [],
     firewall: {
@@ -218,6 +232,22 @@ export function validateConfig(raw: unknown): GatekeeperConfig {
     timeoutMs: int(s, 'timeoutMs', 'server', defaults.server.timeoutMs, 1, 600000),
     trustProxy: bool(s, 'trustProxy', 'server', defaults.server.trustProxy)
   };
+  if (s.tls !== undefined) {
+    if (!isObj(s.tls)) {
+      issues.push('server.tls must be an object');
+    } else {
+      const t = s.tls;
+      const tls: TlsConfig = {
+        certFile: str(t, 'certFile', 'server.tls', ''),
+        keyFile: str(t, 'keyFile', 'server.tls', ''),
+        caFile: t.caFile === undefined ? undefined : str(t, 'caFile', 'server.tls', ''),
+        requestCert: bool(t, 'requestCert', 'server.tls', false)
+      };
+      if (!tls.certFile) issues.push('server.tls.certFile is required when server.tls is set');
+      if (!tls.keyFile) issues.push('server.tls.keyFile is required when server.tls is set');
+      server.tls = tls;
+    }
+  }
   if (server.port !== 0 && server.port === server.adminPort && server.host === server.adminHost) {
     issues.push('server.port and server.adminPort must differ');
   }

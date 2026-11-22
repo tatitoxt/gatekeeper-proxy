@@ -1,4 +1,6 @@
 import http, { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http';
+import https from 'node:https';
+import fs from 'node:fs';
 import { AddressInfo } from 'node:net';
 import { Duplex } from 'node:stream';
 import { GatekeeperConfig, RouteConfig } from '../config/config.js';
@@ -69,6 +71,7 @@ export class ProxyServer {
   private readonly metrics: MetricsCollector;
   private server: http.Server | null = null;
   private upstreamAgent: http.Agent;
+  private upstreamTlsAgent: https.Agent;
 
   constructor(config: GatekeeperConfig, metrics: MetricsCollector = new MetricsCollector()) {
     this.config = config;
@@ -76,12 +79,14 @@ export class ProxyServer {
     this.firewall = new FirewallEngine(config.firewall);
     this.rateLimiter = new RateLimiterEngine(config.rateLimiter);
     this.loadBalancer = new LoadBalancer(config.routes, config.healthCheck);
-    this.upstreamAgent = ProxyServer.buildAgent(config);
+    this.upstreamAgent = ProxyServer.buildAgent(config, false);
+    this.upstreamTlsAgent = ProxyServer.buildAgent(config, true);
   }
 
-  private static buildAgent(config: GatekeeperConfig): http.Agent {
+  private static buildAgent(config: GatekeeperConfig, tls: boolean): http.Agent {
     const u = config.upstream;
-    return new http.Agent({
+    const AgentClass = tls ? https.Agent : http.Agent;
+    return new AgentClass({
       keepAlive: u.keepAlive,
       maxSockets: u.maxSockets,
       maxFreeSockets: u.maxFreeSockets
@@ -107,8 +112,11 @@ export class ProxyServer {
     this.loadBalancer.updateHealthConfig(config.healthCheck);
     if (config.upstream !== this.config.upstream) {
       const old = this.upstreamAgent;
-      this.upstreamAgent = ProxyServer.buildAgent(config);
+      const oldTls = this.upstreamTlsAgent;
+      this.upstreamAgent = ProxyServer.buildAgent(config, false);
+      this.upstreamTlsAgent = ProxyServer.buildAgent(config, true);
       old.destroy();
+      oldTls.destroy();
     }
   }
 
@@ -189,7 +197,7 @@ export class ProxyServer {
       host: targetUrl.host,
       'x-forwarded-for': priorForwardedFor ? `${priorForwardedFor}, ${peerIp}` : peerIp,
       'x-forwarded-host': req.headers.host,
-      'x-forwarded-proto': 'http',
+      'x-forwarded-proto': this.config.server.tls ? 'https' : 'http',
       'x-real-ip': clientIp,
       'x-gatekeeper-proxy': '1.0'
     };
@@ -209,10 +217,11 @@ export class ProxyServer {
     this.loadBalancer.incrementConnection(route.pathPrefix, target);
 
     let timedOut = false;
-    const proxyReq = http.request({
-      agent: this.upstreamAgent,
+    const isTlsTarget = targetUrl.protocol === 'https:';
+    const proxyReq = (isTlsTarget ? https.request : http.request)({
+      agent: isTlsTarget ? this.upstreamTlsAgent : this.upstreamAgent,
       hostname: targetUrl.hostname,
-      port: targetUrl.port || 80,
+      port: targetUrl.port || (isTlsTarget ? 443 : 80),
       path: targetUrl.pathname + targetUrl.search,
       method: req.method,
       headers
@@ -326,10 +335,11 @@ export class ProxyServer {
     };
     this.loadBalancer.incrementConnection(route.pathPrefix, target);
 
-    const proxyReq = http.request({
-      agent: this.upstreamAgent,
+    const isTlsUpgrade = targetUrl.protocol === 'https:';
+    const proxyReq = (isTlsUpgrade ? https.request : http.request)({
+      agent: isTlsUpgrade ? this.upstreamTlsAgent : this.upstreamAgent,
       hostname: targetUrl.hostname,
-      port: targetUrl.port || 80,
+      port: targetUrl.port || (isTlsUpgrade ? 443 : 80),
       path: targetUrl.pathname + targetUrl.search,
       method: req.method,
       headers
@@ -383,7 +393,19 @@ export class ProxyServer {
 
   public start(): Promise<AddressInfo> {
     return new Promise((resolve, reject) => {
-      const server = http.createServer((req, res) => this.handleRequest(req, res));
+      const tls = this.config.server.tls;
+      const server = tls
+        ? https.createServer(
+            {
+              cert: fs.readFileSync(tls.certFile),
+              key: fs.readFileSync(tls.keyFile),
+              ca: tls.caFile ? fs.readFileSync(tls.caFile) : undefined,
+              requestCert: tls.requestCert,
+              rejectUnauthorized: Boolean(tls.caFile && tls.requestCert)
+            },
+            (req, res) => this.handleRequest(req, res)
+          )
+        : http.createServer((req, res) => this.handleRequest(req, res));
       server.on('upgrade', (req, socket, head) => this.handleUpgrade(req, socket, head));
       server.on('clientError', (_err, socket) => {
         if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
