@@ -170,6 +170,27 @@ export class FirewallEngine {
     return { allowed: true };
   }
 
+  /**
+   * Scans a request body with the same signatures used for URLs and
+   * inspected headers. The raw text is checked first, then a lenient decode
+   * (only valid %XX sequences decoded, never fatal) so `q=%27+or+1%3D1` in a
+   * form body and plain `' or 1=1` in JSON are both caught while a literal
+   * "%" in JSON stays legal.
+   */
+  public checkBody(body: string, wafOverrides?: Partial<WafRuleOverrides>): FirewallCheckResult {
+    if (!this.config.enabled) {
+      return { allowed: true };
+    }
+    const wafRules: WafRuleOverrides = { ...this.config.wafRules, ...wafOverrides };
+    const hit =
+      this.scanValue(body, wafRules) ??
+      this.scanValue(decodeValidSequences(body).replace(/\+/g, ' '), wafRules);
+    if (hit) {
+      return { allowed: false, statusCode: 403, reason: `${hit} (in request body)` };
+    }
+    return { allowed: true };
+  }
+
   /** Returns the block reason when a decoded value trips a signature, else null. */
   private scanValue(decoded: string, wafRules: WafRuleOverrides): string | null {
     if (wafRules.blockPathTraversal && PATH_TRAVERSAL_PATTERN.test(decoded)) {

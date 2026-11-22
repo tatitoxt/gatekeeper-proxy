@@ -35,6 +35,18 @@ export interface FirewallConfig {
   customBlockedPaths: string[];
   /** Header names (lowercase) whose values are decoded and scanned with the WAF signatures. */
   inspectedHeaders: string[];
+  /** Request-body WAF inspection (opt-in). Bodies are buffered only while a
+   *  configured content type is present and only up to maxBytes; larger or
+   *  non-matching bodies pass through uninspected. */
+  inspectBody: BodyInspectionConfig;
+}
+
+export interface BodyInspectionConfig {
+  enabled: boolean;
+  /** Bytes buffered for inspection before deciding. Default 64 KiB. */
+  maxBytes: number;
+  /** Content-Type prefixes that trigger buffering (e.g. "application/json"). */
+  contentTypes: string[];
 }
 
 export interface RateLimiterConfig {
@@ -142,7 +154,12 @@ export function defaultConfig(): GatekeeperConfig {
       blockedUserAgents: [],
       wafRules: { blockSqlInjection: true, blockXss: true, blockPathTraversal: true },
       customBlockedPaths: [],
-      inspectedHeaders: []
+      inspectedHeaders: [],
+      inspectBody: {
+        enabled: false,
+        maxBytes: 65536,
+        contentTypes: ['application/json', 'application/x-www-form-urlencoded', 'text/plain']
+      }
     },
     rateLimiter: { globalWindowMs: 60000, globalMaxRequests: 300, backend: 'memory' },
     healthCheck: { intervalMs: 10000, timeoutMs: 3000 },
@@ -358,6 +375,8 @@ export function validateConfig(raw: unknown): GatekeeperConfig {
   const f = section('firewall');
   const w = isObj(f.wafRules) ? f.wafRules : {};
   if (f.wafRules !== undefined && !isObj(f.wafRules)) issues.push('firewall.wafRules must be an object');
+  const ib = isObj(f.inspectBody) ? f.inspectBody : {};
+  if (f.inspectBody !== undefined && !isObj(f.inspectBody)) issues.push('firewall.inspectBody must be an object');
   const firewall: FirewallConfig = {
     enabled: bool(f, 'enabled', 'firewall', defaults.firewall.enabled),
     ipBlacklist: strArray(f, 'ipBlacklist', 'firewall'),
@@ -369,7 +388,14 @@ export function validateConfig(raw: unknown): GatekeeperConfig {
       blockPathTraversal: bool(w, 'blockPathTraversal', 'firewall.wafRules', true)
     },
     customBlockedPaths: strArray(f, 'customBlockedPaths', 'firewall'),
-    inspectedHeaders: strArray(f, 'inspectedHeaders', 'firewall')
+    inspectedHeaders: strArray(f, 'inspectedHeaders', 'firewall'),
+    inspectBody: {
+      enabled: bool(ib, 'enabled', 'firewall.inspectBody', defaults.firewall.inspectBody.enabled),
+      maxBytes: int(ib, 'maxBytes', 'firewall.inspectBody', defaults.firewall.inspectBody.maxBytes, 1024, 16777216),
+      contentTypes: ib.contentTypes !== undefined
+        ? strArray(ib, 'contentTypes', 'firewall.inspectBody')
+        : defaults.firewall.inspectBody.contentTypes
+    }
   };
   const headerName = /^[!#$%&'*+\-.^_`|~0-9a-z]+$/i;
   for (const h of firewall.inspectedHeaders) {

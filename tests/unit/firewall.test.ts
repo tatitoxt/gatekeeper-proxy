@@ -8,7 +8,8 @@ const baseConfig = (): FirewallConfig => ({
   blockedUserAgents: ['sqlmap'],
   wafRules: { blockSqlInjection: true, blockXss: true, blockPathTraversal: true },
   customBlockedPaths: ['^/\\.env', '^/wp-login\\.php'],
-  inspectedHeaders: []
+  inspectedHeaders: [],
+  inspectBody: { enabled: false, maxBytes: 65536, contentTypes: [] }
 });
 
 const req = (url: string, headers: Record<string, string> = {}): FirewallRequest =>
@@ -35,6 +36,19 @@ describe('FirewallEngine', () => {
     expect(firewall.checkRequest(req('/.env.production'), CLIENT).reason).toContain('Blocked Path Rule');
     expect(firewall.checkRequest(req('/%2eenv'), CLIENT).reason).toContain('Blocked Path Rule');
     expect(firewall.checkRequest(req('/wp-login.php'), CLIENT).allowed).toBe(false);
+  });
+
+  test('scans request bodies with the WAF signatures', () => {
+    // JSON body: plain text signatures are caught verbatim.
+    expect(firewall.checkBody('{"q":"1\' OR \'1\'=\'1"}')).toMatchObject({ allowed: false, statusCode: 403 });
+    // Form-encoded body: the lenient decode catches %27/%20 and '+'-as-space.
+    expect(firewall.checkBody('q=1%27+OR+%271%27%3D%271').allowed).toBe(false);
+    expect(firewall.checkBody('body=<script>alert(1)</script>').allowed).toBe(false);
+    // Literal '%' in JSON stays legal; ordinary bodies pass.
+    expect(firewall.checkBody('{"progress":"100%","name":"Fausto"}').allowed).toBe(true);
+    expect(firewall.checkBody('{"sql":"a query about selects"}').allowed).toBe(true);
+    // Per-request overrides honour disabled categories.
+    expect(firewall.checkBody('{"x":"<script>"}', { blockXss: false }).allowed).toBe(true);
   });
 
   test('scans configured headers with the WAF signatures', () => {

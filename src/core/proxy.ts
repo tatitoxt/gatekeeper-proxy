@@ -51,6 +51,42 @@ export function stripHopByHop(headers: IncomingHttpHeaders): IncomingHttpHeaders
   return out;
 }
 
+/**
+ * Buffers a request body up to `cap` bytes. `truncated` is true when the body
+ * exceeds the cap — every byte read is still kept in `chunks` so the caller
+ * can replay the stream faithfully before piping the remainder.
+ */
+export function readBodyPrefix(req: IncomingMessage, cap: number): Promise<{ chunks: Buffer[]; truncated: boolean }> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let truncated = false;
+    const finish = () => {
+      req.removeListener('data', onData);
+      req.removeListener('end', onEnd);
+      req.removeListener('error', onError);
+      resolve({ chunks, truncated });
+    };
+    const onData = (chunk: Buffer) => {
+      chunks.push(chunk);
+      size += chunk.length;
+      if (size > cap) {
+        truncated = true;
+        req.pause();
+        finish();
+      }
+    };
+    const onEnd = () => finish();
+    const onError = () => {
+      truncated = true;
+      finish();
+    };
+    req.on('data', onData);
+    req.once('end', onEnd);
+    req.once('error', onError);
+  });
+}
+
 /** Longest-prefix match on whole path segments: "/api" matches "/api" and "/api/x" but not "/apiary". */
 export function matchRoute(routes: RouteConfig[], url: string): RouteConfig | null {
   const pathname = url.split('?')[0].split('#')[0] || '/';
@@ -181,17 +217,49 @@ export class ProxyServer {
       return;
     }
 
-    // 3. Pick a healthy backend
+    // 3. Optional WAF body inspection: buffer up to inspectBody.maxBytes,
+    //    scan it, then replay the bytes upstream. Oversized or non-matching
+    //    bodies stream through uninspected.
+    let buffered: Buffer[] | undefined;
+    if (this.shouldInspectBody(req)) {
+      const { chunks, truncated } = await readBodyPrefix(req, this.config.firewall.inspectBody.maxBytes);
+      buffered = chunks;
+      if (!truncated) {
+        const bodyVerdict = this.firewall.checkBody(Buffer.concat(chunks).toString('utf8'), route.waf);
+        if (!bodyVerdict.allowed) {
+          const reason = bodyVerdict.reason || 'Blocked by firewall';
+          this.metrics.recordWafBlock(clientIp, url, method, reason);
+          logger.warn({ clientIp, method, url, reason }, 'Request blocked by firewall (body)');
+          this.sendError(res, bodyVerdict.statusCode || 403, reason);
+          return;
+        }
+      }
+    }
+
+    // 4. Pick a healthy backend
     const target = this.loadBalancer.selectTarget(route);
     if (!target) {
       this.sendError(res, 503, 'All backend targets for this route are unavailable');
       return;
     }
 
-    this.forward(req, res, target, route, clientIp);
+    this.forward(req, res, target, route, clientIp, buffered);
   }
 
-  private forward(req: IncomingMessage, res: ServerResponse, target: string, route: RouteConfig, clientIp: string): void {
+  /** True when body inspection applies: enabled, a method that can carry a
+   *  body, a matching content type and a declared non-empty body. */
+  private shouldInspectBody(req: IncomingMessage): boolean {
+    const cfg = this.config.firewall.inspectBody;
+    if (!cfg.enabled) return false;
+    const method = req.method || 'GET';
+    if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) return false;
+    if (req.headers['content-length'] === '0') return false;
+    if (req.headers['content-length'] === undefined && req.headers['transfer-encoding'] === undefined) return false;
+    const contentType = String(req.headers['content-type'] || '').toLowerCase();
+    return cfg.contentTypes.some((prefix) => contentType.startsWith(prefix.toLowerCase()));
+  }
+
+  private forward(req: IncomingMessage, res: ServerResponse, target: string, route: RouteConfig, clientIp: string, buffered?: Buffer[]): void {
     const targetUrl = new URL(req.url || '/', target);
     const peerIp = normalizeIp(req.socket.remoteAddress || '');
     const incoming = stripHopByHop(req.headers);
@@ -272,7 +340,18 @@ export class ProxyServer {
       release();
     });
 
-    req.pipe(proxyReq);
+    if (buffered) {
+      // Body (or its inspected prefix) was already consumed: replay the
+      // captured bytes, then either finish or resume the live stream.
+      for (const chunk of buffered) proxyReq.write(chunk);
+      if (req.readableEnded) {
+        proxyReq.end();
+      } else {
+        req.pipe(proxyReq);
+      }
+    } else {
+      req.pipe(proxyReq);
+    }
   }
 
   private async routeUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {

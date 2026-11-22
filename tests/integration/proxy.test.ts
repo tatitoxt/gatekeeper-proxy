@@ -26,7 +26,8 @@ describe('ProxyServer (in-process, real sockets)', () => {
         ipWhitelist: [],
         blockedUserAgents: ['sqlmap'],
         wafRules: { blockSqlInjection: true, blockXss: true, blockPathTraversal: true },
-        customBlockedPaths: ['^/\\.env'], inspectedHeaders: []
+        customBlockedPaths: ['^/\\.env'], inspectedHeaders: [],
+        inspectBody: { enabled: false, maxBytes: 65536, contentTypes: [] }
       },
       rateLimiter: { globalWindowMs: 60_000, globalMaxRequests: 1000 }
     });
@@ -278,5 +279,117 @@ describe('ProxyServer upstream keep-alive pooling', () => {
     await up.close();
     expect(remotePorts).toHaveLength(4);
     expect(new Set(remotePorts).size).toBe(4);
+  });
+});
+
+describe('ProxyServer WAF body inspection', () => {
+  let up: Upstream;
+  let proxy: ProxyServer;
+  let base: string;
+  const MAX_BYTES = 1024;
+
+  const config = (inspectBody: Partial<GatekeeperConfig['firewall']['inspectBody']> = {}): GatekeeperConfig =>
+    makeConfig({
+      routes: [{ pathPrefix: '/api', targets: [up.url] }],
+      firewall: {
+        enabled: true,
+        ipBlacklist: [],
+        ipWhitelist: [],
+        blockedUserAgents: [],
+        wafRules: { blockSqlInjection: true, blockXss: true, blockPathTraversal: true },
+        customBlockedPaths: [],
+        inspectedHeaders: [],
+        inspectBody: {
+          enabled: true,
+          maxBytes: MAX_BYTES,
+          contentTypes: ['application/json', 'application/x-www-form-urlencoded'],
+          ...inspectBody
+        }
+      }
+    });
+
+  beforeAll(async () => {
+    up = await startUpstream('echo');
+  });
+  afterAll(async () => {
+    await up.close();
+  });
+  afterEach(async () => {
+    if (proxy) await proxy.stop();
+  });
+
+  async function start(cfg: GatekeeperConfig): Promise<void> {
+    proxy = new ProxyServer(cfg);
+    const addr = (await proxy.start()) as AddressInfo;
+    base = `http://127.0.0.1:${addr.port}`;
+  }
+
+  test('blocks a JSON body carrying an injection signature', async () => {
+    await start(config());
+    const res = await request(`${base}/api/items`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: `{"name":"x' OR '1'='1"}`
+    });
+    expect(res.status).toBe(403);
+    expect(res.body).toContain('request body');
+    expect(up.requests).toHaveLength(0);
+  });
+
+  test('blocks a form-encoded body after decoding', async () => {
+    await start(config());
+    const res = await request(`${base}/api/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'user=admin%27+OR+%271%27%3D%271&pass=x'
+    });
+    expect(res.status).toBe(403);
+    expect(up.requests).toHaveLength(0);
+  });
+
+  test('forwards a clean JSON body intact to the upstream', async () => {
+    await start(config());
+    const payload = JSON.stringify({ name: 'Fausto', progress: '100%', tags: ['a', 'b'] });
+    const res = await request(`${base}/api/items`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: payload
+    });
+    expect(res.status).toBe(200);
+    expect(up.requests).toHaveLength(1);
+    expect(up.requests.at(-1)!.body).toBe(payload);
+  });
+
+  test('bodies beyond maxBytes stream through uninspected and uncorrupted', async () => {
+    await start(config());
+    const payload = `{"pad":"${'x'.repeat(MAX_BYTES)}","q":"1' OR '1'='1"}`;
+    const res = await request(`${base}/api/big`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: payload
+    });
+    expect(res.status).toBe(200);
+    expect(up.requests.at(-1)!.body).toBe(payload);
+  });
+
+  test('non-matching content types are never buffered or inspected', async () => {
+    await start(config());
+    const res = await request(`${base}/api/blob`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: `raw ' OR '1'='1 bytes`
+    });
+    expect(res.status).toBe(200);
+    expect(up.requests.at(-1)!.body).toBe(`raw ' OR '1'='1 bytes`);
+  });
+
+  test('disabled config forwards even a matching malicious body', async () => {
+    await start(config({ enabled: false }));
+    const res = await request(`${base}/api/items`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: `{"name":"x' OR '1'='1"}`
+    });
+    expect(res.status).toBe(200);
   });
 });

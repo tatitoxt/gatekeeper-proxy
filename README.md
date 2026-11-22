@@ -102,7 +102,7 @@ if it is not, the admin API returns `500` and does not apply the change.
 | `server.trustProxy` | `false` | Honour `X-Forwarded-For` (only behind your own proxy/LB). |
 | `server.http2` | `false` | Accept HTTP/2 on the proxy listener. With `server.tls` it negotiates h2 vs HTTP/1.1 via ALPN (both work); without TLS the listener is h2c **prior-knowledge only** — plain HTTP/1.1 requests fail. Upstreams stay HTTP/1.1 either way. |
 | `routes[]` | `[]` | `pathPrefix`, `targets` (http URLs), `balanceStrategy`, `healthCheckPath`, `rateLimit {windowMs, maxRequests}`, `waf` (per-route overrides for `firewall.wafRules`; unset keys inherit the globals). |
-| `firewall` | enabled, all WAF rules on | `ipBlacklist`, `ipWhitelist`, `blockedUserAgents`, `customBlockedPaths` (regex), `wafRules`, `inspectedHeaders` (header names scanned with the WAF signatures, e.g. `["referer"]`). |
+| `firewall` | enabled, all WAF rules on | `ipBlacklist`, `ipWhitelist`, `blockedUserAgents`, `customBlockedPaths` (regex), `wafRules`, `inspectedHeaders` (header names scanned with the WAF signatures, e.g. `["referer"]`), `inspectBody` (`enabled`, `maxBytes` default 65536, `contentTypes` — POST/PUT/PATCH/DELETE bodies of a matching content type are buffered up to `maxBytes` and scanned with the same signatures; larger and non-matching bodies stream through uninspected). |
 | `rateLimiter` | `60000` ms / `300` | Global per-IP window. `backend`: `memory` (default) or `redis`; when `redis`, `redisUrl` is required and `keyPrefix` namespaces the counters (default `gk:rl:`). |
 | `healthCheck` | `10000` / `3000` ms | Probe interval and timeout. |
 
@@ -176,8 +176,10 @@ CI runs the unit/integration job on Node 20 and 22, the E2E job, `npm audit --au
 ## Limitations
 
 - **Not production-hardened.** Throughput was benchmarked once (see [docs/benchmarks.md](docs/benchmarks.md): ~3.3k req/s proxied, ~33k req/s WAF-rejected, on a single process) but it has not been security-audited or soaked.
-- **The WAF is pattern-based** and inspects the URL (path + query) plus only the headers named in `inspectedHeaders` — not
-  bodies. It is easy to bypass and can produce false positives; treat it as a demonstration of the technique, not protection.
+- **The WAF is pattern-based** and inspects the URL (path + query), the headers named in `inspectedHeaders`, and — when
+  `firewall.inspectBody.enabled` is set — request bodies of the configured content types up to `inspectBody.maxBytes`
+  (default 64 KiB; larger bodies pass uninspected). It is easy to bypass and can produce false positives; treat it as a
+  demonstration of the technique, not protection.
 - **State is per process and in memory** unless `rateLimiter.backend` is `redis`: metrics and events still reset on restart and are not shared
   between instances.
 - **HTTP/2 client-side only**: `server.http2` accepts HTTP/2 on the listener (ALPN under TLS, prior-knowledge h2c cleartext); upstreams are always contacted over HTTP/1.1 and WebSocket/`Upgrade` is HTTP/1.1-only (h1 clients still get it via ALPN). TLS termination is supported (`server.tls` with `certFile`/`keyFile`, optional `caFile` + `requestCert` for mTLS) and upstreams may be `https://`.
