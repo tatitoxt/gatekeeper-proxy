@@ -24,6 +24,9 @@ export interface RouteConfig {
   rateLimit?: RouteRateLimit;
   /** Per-route overrides for firewall.wafRules; unset keys inherit the global flags. */
   waf?: Partial<WafRuleOverrides>;
+  /** Speak HTTP/2 to every target of this route (multiplexed over one session
+   *  per origin). Cannot combine with healthCheckPath — probes speak HTTP/1.1. */
+  upstreamHttp2?: boolean;
 }
 
 export interface FirewallConfig {
@@ -321,13 +324,23 @@ export function validateConfig(raw: unknown): GatekeeperConfig {
       for (const target of targets) {
         try {
           const u = new URL(target);
-          if (u.protocol !== 'http:') issues.push(`${where}.targets: "${target}" must use http://`);
+          if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+            issues.push(`${where}.targets: "${target}" must use http:// or https://`);
+          }
         } catch {
           issues.push(`${where}.targets: "${target}" is not a valid URL`);
         }
       }
 
       const route: RouteConfig = { pathPrefix, targets };
+
+      if (r.upstreamHttp2 !== undefined) {
+        if (typeof r.upstreamHttp2 !== 'boolean') {
+          issues.push(`${where}.upstreamHttp2 must be a boolean`);
+        } else if (r.upstreamHttp2) {
+          route.upstreamHttp2 = true;
+        }
+      }
 
       if (r.balanceStrategy !== undefined) {
         if (r.balanceStrategy !== 'round-robin' && r.balanceStrategy !== 'least-connections') {
@@ -341,6 +354,9 @@ export function validateConfig(raw: unknown): GatekeeperConfig {
         const hc = str(r, 'healthCheckPath', where, '');
         if (hc && !hc.startsWith('/')) issues.push(`${where}.healthCheckPath must start with "/"`);
         else if (hc) route.healthCheckPath = hc;
+      }
+      if (route.upstreamHttp2 && route.healthCheckPath) {
+        issues.push(`${where} cannot combine upstreamHttp2 with healthCheckPath (health probes speak HTTP/1.1)`);
       }
 
       if (r.rateLimit !== undefined) {

@@ -113,6 +113,8 @@ export class ProxyServer {
   private readonly h2Sessions = new Set<http2.ServerHttp2Session>();
   private upstreamAgent: http.Agent;
   private upstreamTlsAgent: http.Agent;
+  // One multiplexed client session per origin for routes with upstreamHttp2.
+  private readonly h2UpstreamSessions = new Map<string, http2.ClientHttp2Session>();
 
   constructor(config: GatekeeperConfig, metrics: MetricsCollector = new MetricsCollector()) {
     this.config = config;
@@ -160,6 +162,8 @@ export class ProxyServer {
       old.destroy();
       oldTls.destroy();
     }
+    // Routes/targets may have changed: drop every pooled h2 upstream session.
+    this.closeUpstreamH2Sessions();
   }
 
   /** TCP upgrade entry point (WebSocket, CONNECT-style upgrades). Runs the same
@@ -247,6 +251,28 @@ export class ProxyServer {
     this.forward(req, res, target, route, clientIp, buffered);
   }
 
+  /** Returns (and caches) a client session for an h2 upstream origin. Dead
+   *  sessions are evicted on 'goaway', 'close' and 'error' so the next
+   *  request dials a fresh one. */
+  private upstreamH2Session(origin: string): http2.ClientHttp2Session {
+    const pooled = this.h2UpstreamSessions.get(origin);
+    if (pooled && !pooled.destroyed && !pooled.closed) return pooled;
+    const session = http2.connect(origin);
+    const evict = () => {
+      if (this.h2UpstreamSessions.get(origin) === session) this.h2UpstreamSessions.delete(origin);
+    };
+    session.once('close', evict);
+    session.once('goaway', evict);
+    session.once('error', evict);
+    this.h2UpstreamSessions.set(origin, session);
+    return session;
+  }
+
+  private closeUpstreamH2Sessions(): void {
+    for (const session of this.h2UpstreamSessions.values()) session.destroy();
+    this.h2UpstreamSessions.clear();
+  }
+
   /** True when body inspection applies: enabled, a method that can carry a
    *  body, a matching content type and a declared non-empty body. */
   private shouldInspectBody(req: IncomingMessage): boolean {
@@ -290,6 +316,11 @@ export class ProxyServer {
       }
     };
     this.loadBalancer.incrementConnection(route.pathPrefix, target);
+
+    if (route.upstreamHttp2) {
+      this.forwardH2(req, res, targetUrl, route, headers, buffered);
+      return;
+    }
 
     let timedOut = false;
     const isTlsTarget = targetUrl.protocol === 'https:';
@@ -357,6 +388,103 @@ export class ProxyServer {
       }
     } else {
       req.pipe(proxyReq);
+    }
+  }
+
+  /** HTTP/2 upstream path: one pooled client session per origin, the request
+   *  becomes a stream on it. Mirrors `forward`'s metrics/health/error flow. */
+  private forwardH2(
+    req: IncomingMessage,
+    res: ServerResponse,
+    targetUrl: URL,
+    route: RouteConfig,
+    headers: IncomingHttpHeaders,
+    buffered?: Buffer[]
+  ): void {
+    const target = targetUrl.origin;
+    let released = false;
+    const release = () => {
+      if (!released) {
+        released = true;
+        this.loadBalancer.decrementConnection(route.pathPrefix, target);
+      }
+    };
+    this.loadBalancer.incrementConnection(route.pathPrefix, target);
+
+    const rest = { ...headers };
+    delete rest.host; // carried by :authority instead
+    const streamHeaders: http2.OutgoingHttpHeaders = {
+      ...rest,
+      ':method': req.method || 'GET',
+      ':path': targetUrl.pathname + targetUrl.search,
+      ':scheme': targetUrl.protocol === 'https:' ? 'https' : 'http',
+      ':authority': targetUrl.host
+    };
+    // 'content-length'/'transfer-encoding' are already absent or correct for
+    // h2 framing — trailers are not supported on the h2 upstream path.
+    delete streamHeaders['transfer-encoding'];
+
+    let timedOut = false;
+    let stream: http2.ClientHttp2Stream;
+    try {
+      stream = this.upstreamH2Session(target).request(streamHeaders);
+    } catch (err) {
+      release();
+      this.loadBalancer.reportFailure(route.pathPrefix, target);
+      logger.error({ err, target, url: req.url }, 'HTTP/2 upstream request failed');
+      this.sendError(res, 502, 'Failed to connect to backend server');
+      return;
+    }
+
+    stream.setTimeout(this.config.server.timeoutMs, () => {
+      timedOut = true;
+      stream.close(http2.constants.NGHTTP2_CANCEL);
+    });
+
+    stream.on('response', (upstreamHeaders) => {
+      const status = Number(upstreamHeaders[':status']) || 502;
+      this.metrics.recordRequest(status);
+      if (status >= 500) {
+        this.loadBalancer.reportServerError(route.pathPrefix, target);
+      } else {
+        this.loadBalancer.reportSuccess(route.pathPrefix, target);
+      }
+      const responseHeaders = stripHopByHop(upstreamHeaders as IncomingHttpHeaders);
+      res.writeHead(status, responseHeaders);
+      stream.pipe(res);
+      stream.on('end', release);
+    });
+
+    stream.on('error', (err) => {
+      release();
+      if (timedOut) {
+        logger.error({ target, url: req.url }, 'Upstream request timed out');
+      } else {
+        logger.error({ err: err.message, target, url: req.url }, 'HTTP/2 upstream request failed');
+        this.loadBalancer.reportFailure(route.pathPrefix, target);
+      }
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      if (timedOut) this.sendError(res, 504, 'Upstream server timed out');
+      else this.sendError(res, 502, 'Failed to connect to backend server');
+    });
+
+    res.on('close', () => {
+      if (!res.writableFinished) stream.close(http2.constants.NGHTTP2_CANCEL);
+      release();
+    });
+
+    if (buffered) {
+      for (const chunk of buffered) stream.write(chunk);
+      if (req.readableEnded) {
+        stream.end();
+      } else {
+        req.pipe(stream);
+      }
+    } else {
+      req.pipe(stream);
     }
   }
 
@@ -558,5 +686,7 @@ export class ProxyServer {
     });
     await closeLimiter;
     this.upstreamAgent.destroy();
+    this.upstreamTlsAgent.destroy();
+    this.closeUpstreamH2Sessions();
   }
 }

@@ -54,7 +54,7 @@ describe('validateConfig', () => {
     [{ routes: [{ targets: ['http://127.0.0.1:1'] }] }, 'pathPrefix is required'],
     [{ routes: [{ pathPrefix: '/api', targets: [] }] }, 'at least one URL'],
     [{ routes: [{ pathPrefix: '/api', targets: ['not a url'] }] }, 'not a valid URL'],
-    [{ routes: [{ pathPrefix: '/api', targets: ['https://example.com'] }] }, 'must use http://'],
+    [{ routes: [{ pathPrefix: '/api', targets: ['ftp://example.com'] }] }, 'must use http:// or https://'],
     [{ routes: [{ pathPrefix: '/api', targets: ['http://a'], balanceStrategy: 'random' }] }, 'balanceStrategy'],
     [{ routes: [{ pathPrefix: '/api', targets: ['http://a'], rateLimit: { windowMs: 0, maxRequests: 1 } }] }, 'rateLimit.windowMs'],
     [{ routes: [{ pathPrefix: '/api', targets: ['http://a'], waf: 'strict' }] }, 'waf must be an object'],
@@ -69,6 +69,25 @@ describe('validateConfig', () => {
     [{ healthCheck: { intervalMs: 1 } }, 'healthCheck.intervalMs']
   ])('rejects %j', (raw, expected) => {
     expect(issuesOf(raw).join('\n')).toContain(expected);
+  });
+
+  test('accepts https:// upstream targets and upstreamHttp2', () => {
+    const config = validateConfig({
+      routes: [
+        { pathPrefix: '/api', targets: ['https://example.com'] },
+        { pathPrefix: '/h2', targets: ['http://h2.local'], upstreamHttp2: true }
+      ]
+    });
+    expect(config.routes[0].targets).toEqual(['https://example.com']);
+    expect(config.routes[1].upstreamHttp2).toBe(true);
+  });
+
+  test('rejects upstreamHttp2 combined with healthCheckPath', () => {
+    expect(
+      issuesOf({
+        routes: [{ pathPrefix: '/api', targets: ['http://a'], upstreamHttp2: true, healthCheckPath: '/up' }]
+      }).join('\n')
+    ).toContain('cannot combine upstreamHttp2 with healthCheckPath');
   });
 
   test('rejects duplicated route prefixes and non-object roots', () => {
