@@ -1,5 +1,6 @@
 import http, { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http';
 import https from 'node:https';
+import http2 from 'node:http2';
 import fs from 'node:fs';
 import { AddressInfo } from 'node:net';
 import { Duplex } from 'node:stream';
@@ -43,6 +44,8 @@ export function stripHopByHop(headers: IncomingHttpHeaders): IncomingHttpHeaders
   const out: IncomingHttpHeaders = {};
   for (const [name, value] of Object.entries(headers)) {
     const lower = name.toLowerCase();
+    // HTTP/2 pseudo-headers (':authority' etc.) must never reach an HTTP/1.1 upstream.
+    if (lower.startsWith(':')) continue;
     if (!HOP_BY_HOP_HEADERS.has(lower) && !listed.includes(lower) && value !== undefined) out[lower] = value;
   }
   return out;
@@ -69,9 +72,11 @@ export class ProxyServer {
   private rateLimiter: RateLimiterEngine;
   private loadBalancer: LoadBalancer;
   private readonly metrics: MetricsCollector;
-  private server: http.Server | null = null;
+  private server: http.Server | http2.Http2Server | http2.Http2SecureServer | null = null;
+  // Tracked so stop() can end long-lived HTTP/2 sessions after the grace period.
+  private readonly h2Sessions = new Set<http2.ServerHttp2Session>();
   private upstreamAgent: http.Agent;
-  private upstreamTlsAgent: https.Agent;
+  private upstreamTlsAgent: http.Agent;
 
   constructor(config: GatekeeperConfig, metrics: MetricsCollector = new MetricsCollector()) {
     this.config = config;
@@ -196,7 +201,8 @@ export class ProxyServer {
       ...incoming,
       host: targetUrl.host,
       'x-forwarded-for': priorForwardedFor ? `${priorForwardedFor}, ${peerIp}` : peerIp,
-      'x-forwarded-host': req.headers.host,
+      // HTTP/2 clients send ':authority' instead of 'host'.
+      'x-forwarded-host': req.headers.host || req.headers[':authority'],
       'x-forwarded-proto': this.config.server.tls ? 'https' : 'http',
       'x-real-ip': clientIp,
       'x-gatekeeper-proxy': '1.0'
@@ -394,18 +400,39 @@ export class ProxyServer {
   public start(): Promise<AddressInfo> {
     return new Promise((resolve, reject) => {
       const tls = this.config.server.tls;
-      const server = tls
-        ? https.createServer(
-            {
-              cert: fs.readFileSync(tls.certFile),
-              key: fs.readFileSync(tls.keyFile),
-              ca: tls.caFile ? fs.readFileSync(tls.caFile) : undefined,
-              requestCert: tls.requestCert,
-              rejectUnauthorized: Boolean(tls.caFile && tls.requestCert)
-            },
-            (req, res) => this.handleRequest(req, res)
-          )
-        : http.createServer((req, res) => this.handleRequest(req, res));
+      const tlsOpts = tls
+        ? {
+            cert: fs.readFileSync(tls.certFile),
+            key: fs.readFileSync(tls.keyFile),
+            ca: tls.caFile ? fs.readFileSync(tls.caFile) : undefined,
+            requestCert: tls.requestCert,
+            rejectUnauthorized: Boolean(tls.caFile && tls.requestCert)
+          }
+        : undefined;
+      // Node's HTTP/2 compat API exposes the same headers/method/url/socket and
+      // writeHead/end surface the pipeline uses, so the casts are sound.
+      const handler = (
+        req: IncomingMessage | http2.Http2ServerRequest,
+        res: ServerResponse | http2.Http2ServerResponse
+      ) => this.handleRequest(req as IncomingMessage, res as ServerResponse);
+      if (this.config.server.http2 && !tlsOpts) {
+        // Node only honors allowHTTP1 on the secure server: a cleartext h2c
+        // listener speaks prior-knowledge HTTP/2 only.
+        logger.warn('server.http2 without server.tls is h2c prior-knowledge only: HTTP/1.1 requests will fail');
+      }
+      const server = this.config.server.http2
+        ? tlsOpts
+          ? http2.createSecureServer({ ...tlsOpts, allowHTTP1: true }, handler) // ALPN: h2 or http/1.1
+          : http2.createServer(handler) // h2c prior-knowledge
+        : tlsOpts
+          ? https.createServer(tlsOpts, handler)
+          : http.createServer(handler);
+      if (this.config.server.http2) {
+        (server as http2.Http2Server).on('session', (session) => {
+          this.h2Sessions.add(session);
+          session.on('close', () => this.h2Sessions.delete(session));
+        });
+      }
       server.on('upgrade', (req, socket, head) => this.handleUpgrade(req, socket, head));
       server.on('clientError', (_err, socket) => {
         if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
@@ -431,9 +458,18 @@ export class ProxyServer {
       if (!server) return resolve();
       this.server = null;
       server.close(() => resolve());
-      server.closeIdleConnections();
+      // closeIdleConnections/closeAllConnections exist on both h1 and h2 servers
+      // at runtime but are not declared on the h2 types.
+      const closable = server as http.Server;
+      // closeIdleConnections/closeAllConnections exist on h1 servers only; h2
+      // sessions are tracked in h2Sessions and destroyed after the same grace.
+      if (typeof closable.closeIdleConnections === 'function') closable.closeIdleConnections();
       // Give in-flight requests a grace period, then drop remaining keep-alive sockets.
-      setTimeout(() => server.closeAllConnections(), 5000).unref();
+      setTimeout(() => {
+        if (typeof closable.closeAllConnections === 'function') closable.closeAllConnections();
+        for (const session of this.h2Sessions) session.destroy();
+        this.h2Sessions.clear();
+      }, 5000).unref();
     });
     await closeLimiter;
     this.upstreamAgent.destroy();

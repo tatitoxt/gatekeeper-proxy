@@ -13,7 +13,7 @@ describe('ProxyServer (in-process, real sockets)', () => {
 
   const config = (): GatekeeperConfig =>
     makeConfig({
-      server: { port: 0, adminPort: 0, host: '127.0.0.1', adminHost: '127.0.0.1', timeoutMs: 300, trustProxy: false },
+      server: { port: 0, adminPort: 0, host: '127.0.0.1', adminHost: '127.0.0.1', timeoutMs: 300, trustProxy: false, http2: false },
       routes: [
         { pathPrefix: '/api', targets: [a.url, b.url] },
         { pathPrefix: '/auth', targets: [a.url], rateLimit: { windowMs: 60_000, maxRequests: 2 } },
@@ -181,7 +181,7 @@ describe('ProxyServer behind a trusted proxy', () => {
     upstream = await startUpstream('u');
     proxy = new ProxyServer(
       makeConfig({
-        server: { port: 0, adminPort: 0, host: '127.0.0.1', adminHost: '127.0.0.1', timeoutMs: 1000, trustProxy: true },
+        server: { port: 0, adminPort: 0, host: '127.0.0.1', adminHost: '127.0.0.1', timeoutMs: 1000, trustProxy: true, http2: false },
         routes: [{ pathPrefix: '/', targets: [upstream.url] }],
         firewall: { ...makeConfig().firewall, ipBlacklist: ['203.0.113.7'] }
       })

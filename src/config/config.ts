@@ -75,6 +75,9 @@ export interface ServerConfig {
   trustProxy: boolean;
   /** When set, the proxy listener serves HTTPS instead of HTTP. Paths resolve from the working directory. */
   tls?: TlsConfig;
+  /** Accept HTTP/2 on the proxy listener (ALPN with TLS, prior-knowledge h2c
+   *  cleartext). HTTP/1.1 clients keep working either way. */
+  http2: boolean;
 }
 
 export interface UpstreamConfig {
@@ -128,7 +131,8 @@ export function defaultConfig(): GatekeeperConfig {
       adminHost: '127.0.0.1',
       timeoutMs: 30000,
       trustProxy: false,
-      tls: undefined
+      tls: undefined,
+      http2: false
     },
     routes: [],
     firewall: {
@@ -230,7 +234,8 @@ export function validateConfig(raw: unknown): GatekeeperConfig {
     host: str(s, 'host', 'server', defaults.server.host),
     adminHost: str(s, 'adminHost', 'server', defaults.server.adminHost),
     timeoutMs: int(s, 'timeoutMs', 'server', defaults.server.timeoutMs, 1, 600000),
-    trustProxy: bool(s, 'trustProxy', 'server', defaults.server.trustProxy)
+    trustProxy: bool(s, 'trustProxy', 'server', defaults.server.trustProxy),
+    http2: bool(s, 'http2', 'server', defaults.server.http2)
   };
   if (s.tls !== undefined) {
     if (!isObj(s.tls)) {

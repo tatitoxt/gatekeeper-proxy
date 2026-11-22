@@ -1,5 +1,6 @@
 import https from 'node:https';
 import http from 'node:http';
+import fs from 'node:fs';
 import path from 'node:path';
 import { AddressInfo } from 'node:net';
 import { ProxyServer } from '../../src/core/proxy.js';
@@ -47,7 +48,7 @@ describe('TLS termination and https upstreams', () => {
   });
 
   it('forwards to https:// upstream targets', async () => {
-    const tlsUpstream = https.createServer({ cert: require('fs').readFileSync(cert), key: require('fs').readFileSync(key) }, (req, res) => {
+    const tlsUpstream = https.createServer({ cert: fs.readFileSync(cert), key: fs.readFileSync(key) }, (_req, res) => {
       res.writeHead(200);
       res.end('secure upstream');
     });
