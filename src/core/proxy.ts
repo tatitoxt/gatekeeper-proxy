@@ -2,7 +2,7 @@ import http, { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node
 import https from 'node:https';
 import http2 from 'node:http2';
 import fs from 'node:fs';
-import { AddressInfo } from 'node:net';
+import { AddressInfo, Socket } from 'node:net';
 import { Duplex } from 'node:stream';
 import { GatekeeperConfig, RouteConfig } from '../config/config.js';
 import { FirewallEngine } from '../firewall/firewall.js';
@@ -87,6 +87,21 @@ export function readBodyPrefix(req: IncomingMessage, cap: number): Promise<{ chu
   });
 }
 
+/**
+ * Reduces a request target to a normalized path+query against a placeholder origin:
+ * resolves dot segments and discards absolute or scheme-relative authorities, so
+ * route matching and upstream forwarding both see the canonical client path.
+ * Falls back to the raw value when it cannot be parsed.
+ */
+export function normalizedRequestPath(rawUrl: string): string {
+  try {
+    const u = new URL(rawUrl, 'http://internal.invalid');
+    return u.pathname + u.search;
+  } catch {
+    return rawUrl;
+  }
+}
+
 /** Longest-prefix match on whole path segments: "/api" matches "/api" and "/api/x" but not "/apiary". */
 export function matchRoute(routes: RouteConfig[], url: string): RouteConfig | null {
   const pathname = url.split('?')[0].split('#')[0] || '/';
@@ -111,6 +126,9 @@ export class ProxyServer {
   private server: http.Server | http2.Http2Server | http2.Http2SecureServer | null = null;
   // Tracked so stop() can end long-lived HTTP/2 sessions after the grace period.
   private readonly h2Sessions = new Set<http2.ServerHttp2Session>();
+  // Every accepted socket (h1 keep-alive, WS/upgrade tunnels, h2 transports):
+  // server.close* helpers cannot see upgraded sockets, so stop() drains these.
+  private readonly connections = new Set<Socket>();
   private upstreamAgent: http.Agent;
   private upstreamTlsAgent: http.Agent;
   // One multiplexed client session per origin for routes with upstreamHttp2.
@@ -129,8 +147,10 @@ export class ProxyServer {
   private static buildAgent(config: GatekeeperConfig, tls: boolean): http.Agent {
     const u = config.upstream;
     const AgentClass = tls ? https.Agent : http.Agent;
+    // maxFreeSockets 0 means "pool nothing": Node would read 0 as falsy and use
+    // its default, so disabling keepAlive is the honest way to express it.
     return new AgentClass({
-      keepAlive: u.keepAlive,
+      keepAlive: u.keepAlive && u.maxFreeSockets !== 0,
       maxSockets: u.maxSockets,
       maxFreeSockets: u.maxFreeSockets
     });
@@ -148,13 +168,15 @@ export class ProxyServer {
     if (config.server.port !== this.config.server.port || config.server.host !== this.config.server.host) {
       logger.warn('server.port/server.host changes require a restart; keeping the current listener');
     }
+    // Compare before assigning: upstream pool changes need a fresh agent.
+    const upstreamChanged = JSON.stringify(config.upstream) !== JSON.stringify(this.config.upstream);
     this.config = config;
     this.firewall.updateConfig(config.firewall);
     this.rateLimiter.updateGlobalConfig(config.rateLimiter);
     this.loadBalancer.updateRoutes(config.routes);
     this.loadBalancer.updateHealthConfig(config.healthCheck);
     this.loadBalancer.updateCircuitBreakerConfig(config.circuitBreaker);
-    if (config.upstream !== this.config.upstream) {
+    if (upstreamChanged) {
       const old = this.upstreamAgent;
       const oldTls = this.upstreamTlsAgent;
       this.upstreamAgent = ProxyServer.buildAgent(config, false);
@@ -162,8 +184,19 @@ export class ProxyServer {
       old.destroy();
       oldTls.destroy();
     }
-    // Routes/targets may have changed: drop every pooled h2 upstream session.
-    this.closeUpstreamH2Sessions();
+    // Only drop h2 sessions for origins no route uses anymore; surviving
+    // sessions keep multiplexing so a reload does not abort in-flight streams.
+    const wantedOrigins = new Set(
+      config.routes
+        .filter((r) => r.upstreamHttp2)
+        .flatMap((r) => r.targets.map((t) => new URL(t).origin))
+    );
+    for (const [origin, session] of this.h2UpstreamSessions) {
+      if (!wantedOrigins.has(origin)) {
+        session.destroy();
+        this.h2UpstreamSessions.delete(origin);
+      }
+    }
   }
 
   /** TCP upgrade entry point (WebSocket, CONNECT-style upgrades). Runs the same
@@ -188,8 +221,10 @@ export class ProxyServer {
     const method = req.method || 'GET';
 
     // 1. Firewall: IP lists, user agents, blocked paths, signature rules
-    //    (the route match runs first so per-route WAF overrides apply)
-    const route = matchRoute(this.config.routes, url);
+    //    (the route match runs first so per-route WAF overrides apply). Matching
+    //    uses the normalized path so dot segments cannot smuggle a request into a
+    //    route with weaker WAF rules than the one its final path belongs to.
+    const route = matchRoute(this.config.routes, normalizedRequestPath(url));
     const verdict = this.firewall.checkRequest(req, clientIp, route?.waf);
     if (!verdict.allowed) {
       const status = verdict.statusCode || 403;
@@ -281,13 +316,15 @@ export class ProxyServer {
     const method = req.method || 'GET';
     if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) return false;
     if (req.headers['content-length'] === '0') return false;
-    if (req.headers['content-length'] === undefined && req.headers['transfer-encoding'] === undefined) return false;
+    // HTTP/2 requests carry bodies in DATA frames without Content-Length and
+    // never use Transfer-Encoding: inspect them even with no declared body.
+    if (req.headers['content-length'] === undefined && req.headers['transfer-encoding'] === undefined && req.httpVersionMajor < 2) return false;
     const contentType = String(req.headers['content-type'] || '').toLowerCase();
     return cfg.contentTypes.some((prefix) => contentType.startsWith(prefix.toLowerCase()));
   }
 
   private forward(req: IncomingMessage, res: ServerResponse, target: string, route: RouteConfig, clientIp: string, buffered?: Buffer[]): void {
-    const targetUrl = new URL(req.url || '/', target);
+    const targetUrl = new URL(normalizedRequestPath(req.url || '/'), target);
     const peerIp = normalizeIp(req.socket.remoteAddress || '');
     const incoming = stripHopByHop(req.headers);
     const priorForwardedFor = this.config.server.trustProxy ? incoming['x-forwarded-for'] : undefined;
@@ -304,7 +341,9 @@ export class ProxyServer {
     };
     // Transfer-Encoding is hop-by-hop and stripped above; re-frame chunked bodies so Node does not
     // write them raw (unframed) for methods like GET/DELETE, which would allow request smuggling.
-    if (req.headers['transfer-encoding'] && headers['content-length'] === undefined) {
+    // HTTP/2 forbids Transfer-Encoding yet bodies may arrive without Content-Length;
+    // re-chunk those too so they are never written unframed to an HTTP/1.1 upstream.
+    if (headers['content-length'] === undefined && (req.headers['transfer-encoding'] || req.httpVersionMajor >= 2)) {
       headers['transfer-encoding'] = 'chunked';
     }
 
@@ -318,7 +357,7 @@ export class ProxyServer {
     this.loadBalancer.incrementConnection(route.pathPrefix, target);
 
     if (route.upstreamHttp2) {
-      this.forwardH2(req, res, targetUrl, route, headers, buffered);
+      this.forwardH2(req, res, targetUrl, target, route, headers, buffered, release);
       return;
     }
 
@@ -397,19 +436,14 @@ export class ProxyServer {
     req: IncomingMessage,
     res: ServerResponse,
     targetUrl: URL,
+    target: string,
     route: RouteConfig,
     headers: IncomingHttpHeaders,
-    buffered?: Buffer[]
+    buffered: Buffer[] | undefined,
+    release: () => void
   ): void {
-    const target = targetUrl.origin;
-    let released = false;
-    const release = () => {
-      if (!released) {
-        released = true;
-        this.loadBalancer.decrementConnection(route.pathPrefix, target);
-      }
-    };
-    this.loadBalancer.incrementConnection(route.pathPrefix, target);
+    // `target` is the configured URL string: load-balancer bookkeeping must use
+    // the same key `forward` incremented, not the normalized origin.
 
     const rest = { ...headers };
     delete rest.host; // carried by :authority instead
@@ -420,14 +454,21 @@ export class ProxyServer {
       ':scheme': targetUrl.protocol === 'https:' ? 'https' : 'http',
       ':authority': targetUrl.host
     };
-    // 'content-length'/'transfer-encoding' are already absent or correct for
-    // h2 framing — trailers are not supported on the h2 upstream path.
+    // HTTP/2 forbids connection-scoped headers; a h1 client's 'connection'
+    // header makes the upstream answer 400.
     delete streamHeaders['transfer-encoding'];
+    delete streamHeaders['connection'];
+    delete streamHeaders['keep-alive'];
+    delete streamHeaders['proxy-connection'];
+    delete streamHeaders['upgrade'];
+    if (streamHeaders['te'] !== 'trailers') delete streamHeaders['te'];
 
     let timedOut = false;
     let stream: http2.ClientHttp2Stream;
     try {
-      stream = this.upstreamH2Session(target).request(streamHeaders);
+      // endStream:false — Node auto-ends GET/HEAD/DELETE streams, which would make
+      // piping a body fail with ERR_STREAM_WRITE_AFTER_END.
+      stream = this.upstreamH2Session(targetUrl.origin).request(streamHeaders, { endStream: false });
     } catch (err) {
       release();
       this.loadBalancer.reportFailure(route.pathPrefix, target);
@@ -438,8 +479,12 @@ export class ProxyServer {
 
     stream.setTimeout(this.config.server.timeoutMs, () => {
       timedOut = true;
+      // CANCEL produces 'close', not 'error': answer the client here so it is
+      // never left hanging on an upstream that never sent headers.
+      if (!res.headersSent) this.sendError(res, 504, 'Upstream server timed out');
       stream.close(http2.constants.NGHTTP2_CANCEL);
     });
+    stream.on('close', release);
 
     stream.on('response', (upstreamHeaders) => {
       const status = Number(upstreamHeaders[':status']) || 502;
@@ -493,7 +538,7 @@ export class ProxyServer {
     const url = req.url || '/';
     const method = req.method || 'GET';
 
-    const route = matchRoute(this.config.routes, url);
+    const route = matchRoute(this.config.routes, normalizedRequestPath(url));
     const verdict = this.firewall.checkRequest(req, clientIp, route?.waf);
     if (!verdict.allowed) {
       const status = verdict.statusCode || 403;
@@ -519,7 +564,7 @@ export class ProxyServer {
       this.rejectUpgrade(socket, 503);
       return;
     }
-    this.forwardUpgrade(req, socket, head, target, route);
+    this.forwardUpgrade(req, socket, head, target, route, clientIp);
   }
 
   /** Writes a bare HTTP error on a raw socket, used before any 101 is sent. */
@@ -529,19 +574,28 @@ export class ProxyServer {
     socket.end(`HTTP/1.1 ${status} ${label}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
   }
 
-  private forwardUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, target: string, route: RouteConfig): void {
-    const targetUrl = new URL(req.url || '/', target);
+  private forwardUpgrade(
+    req: IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+    target: string,
+    route: RouteConfig,
+    clientIp: string
+  ): void {
+    const targetUrl = new URL(normalizedRequestPath(req.url || '/'), target);
     const peerIp = normalizeIp(req.socket.remoteAddress || '');
     const incoming = stripHopByHop(req.headers);
+    const priorForwardedFor = this.config.server.trustProxy ? incoming['x-forwarded-for'] : undefined;
     const headers: IncomingHttpHeaders = {
       ...incoming,
       // upgrade/connection were stripped above; the upstream needs them.
       connection: 'Upgrade',
       upgrade: req.headers.upgrade || 'websocket',
       host: targetUrl.host,
-      'x-forwarded-for': peerIp,
+      'x-forwarded-for': priorForwardedFor ? `${priorForwardedFor}, ${peerIp}` : peerIp,
       'x-forwarded-host': req.headers.host,
-      'x-real-ip': normalizeIp(req.socket.remoteAddress || ''),
+      'x-forwarded-proto': this.config.server.tls ? 'https' : 'http',
+      'x-real-ip': clientIp,
       'x-gatekeeper-proxy': '1.0'
     };
 
@@ -564,13 +618,18 @@ export class ProxyServer {
       headers
     });
 
-    proxyReq.on('upgrade', (proxyRes, proxySocket) => {
+    proxyReq.on('upgrade', (proxyRes, proxySocket, upstreamHead) => {
       // Relay the upstream 101 verbatim, then tunnel bytes both directions.
+      this.metrics.recordRequest(proxyRes.statusCode || 101);
+      this.loadBalancer.reportSuccess(route.pathPrefix, target);
       const lines = [`HTTP/1.1 ${proxyRes.statusCode} ${proxyRes.statusMessage}`];
       for (let i = 0; i < proxyRes.rawHeaders.length; i += 2) {
         lines.push(`${proxyRes.rawHeaders[i]}: ${proxyRes.rawHeaders[i + 1]}`);
       }
       socket.write(`${lines.join('\r\n')}\r\n\r\n`);
+      // Bytes the upstream parser already consumed past its 101 headers must be
+      // replayed too, or the client loses the first frames.
+      if (upstreamHead && upstreamHead.length > 0) socket.write(upstreamHead);
       if (head.length > 0) proxySocket.write(head);
       proxySocket.pipe(socket);
       socket.pipe(proxySocket);
@@ -582,17 +641,36 @@ export class ProxyServer {
 
     proxyReq.on('response', (proxyRes) => {
       // Upstream refused the upgrade with a plain HTTP response: forward it.
-      const lines = [`HTTP/1.1 ${proxyRes.statusCode} ${proxyRes.statusMessage}`];
-      for (let i = 0; i < proxyRes.rawHeaders.length; i += 2) {
-        lines.push(`${proxyRes.rawHeaders[i]}: ${proxyRes.rawHeaders[i + 1]}`);
+      const status = proxyRes.statusCode || 502;
+      this.metrics.recordRequest(status);
+      if (status >= 500) {
+        this.loadBalancer.reportServerError(route.pathPrefix, target);
+      } else {
+        this.loadBalancer.reportSuccess(route.pathPrefix, target);
       }
+      // proxyRes already decoded framing (e.g. chunked): forwarding its raw
+      // headers verbatim would describe bytes we never send. Drop transfer
+      // framing and end the tunnel when the response ends.
+      const filtered = proxyRes.rawHeaders.filter(
+        (v, i) => i % 2 === 0 && !['transfer-encoding', 'connection', 'keep-alive'].includes(v.toLowerCase())
+      );
+      const lines = [`HTTP/1.1 ${proxyRes.statusCode} ${proxyRes.statusMessage}`];
+      for (let i = 0; i < filtered.length; i += 2) {
+        lines.push(`${filtered[i]}: ${filtered[i + 1]}`);
+      }
+      lines.push('Connection: close');
       socket.write(`${lines.join('\r\n')}\r\n\r\n`);
-      proxyRes.pipe(socket);
+      proxyRes.pipe(socket, { end: true });
       proxyRes.on('end', release);
+    });
+
+    proxyReq.setTimeout(this.config.server.timeoutMs, () => {
+      proxyReq.destroy(new Error(`Upstream did not answer the upgrade within ${this.config.server.timeoutMs}ms`));
     });
 
     proxyReq.on('error', () => {
       release();
+      this.metrics.recordRequest(502);
       this.loadBalancer.reportFailure(route.pathPrefix, target);
       socket.destroy();
     });
@@ -646,6 +724,14 @@ export class ProxyServer {
           session.on('close', () => this.h2Sessions.delete(session));
         });
       }
+      server.on('connection', (socket) => {
+        this.connections.add(socket);
+        socket.on('close', () => this.connections.delete(socket));
+      });
+      server.on('secureConnection', (socket) => {
+        this.connections.add(socket);
+        socket.on('close', () => this.connections.delete(socket));
+      });
       server.on('upgrade', (req, socket, head) => this.handleUpgrade(req, socket, head));
       server.on('clientError', (_err, socket) => {
         if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
@@ -682,6 +768,8 @@ export class ProxyServer {
         if (typeof closable.closeAllConnections === 'function') closable.closeAllConnections();
         for (const session of this.h2Sessions) session.destroy();
         this.h2Sessions.clear();
+        for (const socket of this.connections) socket.destroy();
+        this.connections.clear();
       }, 5000).unref();
     });
     await closeLimiter;
