@@ -1,11 +1,16 @@
 import http from 'node:http';
-import { HealthCheckConfig, RouteConfig } from '../config/config.js';
+import https from 'node:https';
+import { CircuitBreakerConfig, HealthCheckConfig, RouteConfig } from '../config/config.js';
 import { logger } from '../utils/logger.js';
 
 export interface BackendTargetState {
   url: string;
   isHealthy: boolean;
   activeConnections: number;
+  /** Consecutive upstream failures feeding the circuit breaker. */
+  consecutiveFailures: number;
+  /** Epoch ms until which the breaker keeps this target out; null when closed. */
+  openUntil: number | null;
 }
 
 interface RouteState {
@@ -18,14 +23,25 @@ interface RouteState {
  * Chooses a backend per route (round-robin or least-connections). Routes with a
  * `healthCheckPath` are actively probed and also passively marked down on connection
  * errors; routes without one treat every target as always healthy.
+ *
+ * The circuit breaker is passive and needs no probes: `failureThreshold` consecutive
+ * upstream failures (connect errors or 5xx responses) open the breaker and keep the
+ * target out for `openMs`, then one half-open trial decides — a success closes it,
+ * another failure reopens it for `openMs` again.
  */
 export class LoadBalancer {
   private routes: Map<string, RouteState> = new Map();
   private healthConfig: HealthCheckConfig;
+  private breakerConfig: CircuitBreakerConfig;
   private timer: NodeJS.Timeout | null = null;
 
-  constructor(routes: RouteConfig[], healthConfig: HealthCheckConfig = { intervalMs: 10000, timeoutMs: 3000 }) {
+  constructor(
+    routes: RouteConfig[],
+    healthConfig: HealthCheckConfig = { intervalMs: 10000, timeoutMs: 3000 },
+    breakerConfig: CircuitBreakerConfig = { failureThreshold: 5, openMs: 30000 }
+  ) {
     this.healthConfig = healthConfig;
+    this.breakerConfig = breakerConfig;
     this.updateRoutes(routes);
   }
 
@@ -47,13 +63,17 @@ export class LoadBalancer {
     if (changed && this.timer) this.start();
   }
 
+  public updateCircuitBreakerConfig(breakerConfig: CircuitBreakerConfig): void {
+    this.breakerConfig = breakerConfig;
+  }
+
   public updateRoutes(routes: RouteConfig[]): void {
     const next = new Map<string, RouteState>();
     for (const route of routes) {
       const existing = this.routes.get(route.pathPrefix);
       const targets = route.targets.map((url) => {
         const found = existing?.targets.find((t) => t.url === url);
-        if (!found) return { url, isHealthy: true, activeConnections: 0 };
+        if (!found) return { url, isHealthy: true, activeConnections: 0, consecutiveFailures: 0, openUntil: null };
         // Without health checks nothing would ever mark a target healthy again.
         if (!route.healthCheckPath) found.isHealthy = true;
         return found;
@@ -67,7 +87,15 @@ export class LoadBalancer {
   public selectTarget(route: RouteConfig): string | null {
     const state = this.routes.get(route.pathPrefix);
     if (!state) return null;
-    const healthy = state.targets.filter((t) => t.isHealthy);
+    const now = Date.now();
+    for (const t of state.targets) {
+      // Breaker cooldown elapsed: let one request through as a half-open trial.
+      if (t.openUntil !== null && t.openUntil <= now) {
+        t.openUntil = null;
+        if (!t.isHealthy) this.setHealth(route.pathPrefix, t, true);
+      }
+    }
+    const healthy = state.targets.filter((t) => t.isHealthy && t.openUntil === null);
     if (healthy.length === 0) return null;
 
     if (route.balanceStrategy === 'least-connections') {
@@ -93,12 +121,48 @@ export class LoadBalancer {
     if (target) target.activeConnections = Math.max(0, target.activeConnections - 1);
   }
 
-  /** Passive health: a connection failure takes the target out until the next successful probe. */
+  /** Passive health: a connection failure takes the target out until the next successful
+   *  probe; consecutive failures also feed the circuit breaker (works without a
+   *  healthCheckPath — recovery is a timed half-open trial instead of a probe). */
   public reportFailure(pathPrefix: string, targetUrl: string): void {
     const state = this.routes.get(pathPrefix);
-    if (!state?.route.healthCheckPath) return;
+    if (!state) return;
     const target = state.targets.find((t) => t.url === targetUrl);
-    if (target) this.setHealth(pathPrefix, target, false);
+    if (!target) return;
+    target.consecutiveFailures++;
+    if (state.route.healthCheckPath) this.setHealth(pathPrefix, target, false);
+    this.feedBreaker(pathPrefix, target);
+  }
+
+  /** A 5xx upstream response feeds the circuit breaker without marking the target
+   *  unhealthy for the probe loop — one bad response is not a connectivity failure. */
+  public reportServerError(pathPrefix: string, targetUrl: string): void {
+    const target = this.find(pathPrefix, targetUrl);
+    if (!target) return;
+    target.consecutiveFailures++;
+    this.feedBreaker(pathPrefix, target);
+  }
+
+  private feedBreaker(pathPrefix: string, target: BackendTargetState): void {
+    if (target.consecutiveFailures < this.breakerConfig.failureThreshold) return;
+    const opened = target.openUntil === null;
+    target.openUntil = Date.now() + this.breakerConfig.openMs;
+    this.setHealth(pathPrefix, target, false);
+    if (opened) {
+      logger.warn(
+        { route: pathPrefix, target: target.url, failures: target.consecutiveFailures },
+        'Circuit breaker opened'
+      );
+    }
+  }
+
+  /** A healthy upstream response closes the breaker and clears the failure streak. */
+  public reportSuccess(pathPrefix: string, targetUrl: string): void {
+    const target = this.find(pathPrefix, targetUrl);
+    if (!target) return;
+    target.consecutiveFailures = 0;
+    target.openUntil = null;
+    if (!target.isHealthy) this.setHealth(pathPrefix, target, true);
   }
 
   public async runHealthChecks(): Promise<void> {
@@ -123,7 +187,9 @@ export class LoadBalancer {
         }
       };
       try {
-        const req = http.get(new URL(healthPath, baseUrl), { timeout: this.healthConfig.timeoutMs }, (res) => {
+        const url = new URL(healthPath, baseUrl);
+        const transport = url.protocol === 'https:' ? https : http;
+        const req = transport.get(url, { timeout: this.healthConfig.timeoutMs }, (res) => {
           res.resume();
           const status = res.statusCode ?? 0;
           done(status >= 200 && status < 400);

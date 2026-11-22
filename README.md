@@ -29,7 +29,8 @@ trust boundaries) are visible and tested.
 | Routing | Longest path-prefix match on whole segments (`/api` matches `/api/x`, not `/apiary`); unmatched paths get `404`. |
 | Load balancing | `round-robin` or `least-connections` per route. |
 | Clustering | `cluster.workers: N` forks N proxy workers sharing the listener via `node:cluster` (respawned on exit); the primary owns the admin API alone. Pair with the Redis backend for a shared rate-limit budget across workers. |
-| Health checks | Routes with `healthCheckPath` are probed every `healthCheck.intervalMs`; failing targets (or ones that refuse connections) leave rotation until a probe succeeds, and `503` is returned when none are left. |
+| Health checks | Routes with `healthCheckPath` are probed every `healthCheck.intervalMs` (http and https targets); failing targets (or ones that refuse connections) leave rotation until a probe succeeds, and `503` is returned when none are left. |
+| Circuit breaker | Passive, needs no probes: `circuitBreaker.failureThreshold` consecutive upstream failures (connect errors *or* 5xx responses) take a target out for `circuitBreaker.openMs`, then a half-open trial either closes the breaker or reopens it. A healthy response clears the streak. |
 | Proxying | Streams bodies both ways over pooled keep-alive upstream connections (`upstream.keepAlive`/`maxSockets`/`maxFreeSockets`), sets `X-Forwarded-For/-Host/-Proto` and `X-Real-IP`, strips hop-by-hop headers, `502` on upstream errors and `504` after `server.timeoutMs`. |
 | Rate limiting | Sliding window per client IP: a global limit plus optional per-route limits. Returns `429` with `X-RateLimit-*` and `Retry-After`. Two backends: in-memory (default) or Redis (`rateLimiter.backend: "redis"`), which shares the budget across instances via one atomic Lua script per check. |
 | Firewall | IP allowlist/blocklist (IPv4/IPv6, CIDR), blocked User-Agent substrings, custom path regexes, and pattern rules for SQL injection, XSS and path traversal on the (up to 3× percent-decoded) URL. Malformed encoding gets `400`. |
@@ -105,6 +106,7 @@ if it is not, the admin API returns `500` and does not apply the change.
 | `firewall` | enabled, all WAF rules on | `ipBlacklist`, `ipWhitelist`, `blockedUserAgents`, `customBlockedPaths` (regex), `wafRules`, `inspectedHeaders` (header names scanned with the WAF signatures, e.g. `["referer"]`), `inspectBody` (`enabled`, `maxBytes` default 65536, `contentTypes` — POST/PUT/PATCH/DELETE bodies of a matching content type are buffered up to `maxBytes` and scanned with the same signatures; larger and non-matching bodies stream through uninspected). |
 | `rateLimiter` | `60000` ms / `300` | Global per-IP window. `backend`: `memory` (default) or `redis`; when `redis`, `redisUrl` is required and `keyPrefix` namespaces the counters (default `gk:rl:`). |
 | `healthCheck` | `10000` / `3000` ms | Probe interval and timeout. |
+| `circuitBreaker` | `5` / `30000` ms | `failureThreshold` consecutive failures open the breaker for `openMs`. |
 
 | Environment variable | Purpose |
 | --- | --- |
@@ -143,7 +145,7 @@ flowchart LR
 | --- | --- |
 | [`src/index.ts`](src/index.ts) | CLI entrypoint: wires config, proxy, admin; graceful shutdown on SIGINT/SIGTERM. |
 | [`src/core/proxy.ts`](src/core/proxy.ts) | Request pipeline, forwarding, header handling, error mapping. |
-| [`src/core/load-balancer.ts`](src/core/load-balancer.ts) | Target selection, connection counts, active/passive health. |
+| [`src/core/load-balancer.ts`](src/core/load-balancer.ts) | Target selection, connection counts, active/passive health, circuit breaker. |
 | [`src/rate-limiter/rate-limiter.ts`](src/rate-limiter/rate-limiter.ts) | Sliding-window counters with an injectable clock. |
 | [`src/firewall/firewall.ts`](src/firewall/firewall.ts) | IP/UA/path rules and WAF signatures. |
 | [`src/config/config.ts`](src/config/config.ts) | Schema validation, defaults, hot reload, persistence. |

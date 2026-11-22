@@ -53,10 +53,58 @@ describe('LoadBalancer', () => {
     lb.reportFailure('/api', 'http://a:1');
     lb.updateRoutes([{ ...r, targets: ['http://a:1', 'http://d:4'] }]);
     expect(lb.getTargetStates('/api')).toEqual([
-      { url: 'http://a:1', isHealthy: false, activeConnections: 0 },
-      { url: 'http://d:4', isHealthy: true, activeConnections: 0 }
+      { url: 'http://a:1', isHealthy: false, activeConnections: 0, consecutiveFailures: 1, openUntil: null },
+      { url: 'http://d:4', isHealthy: true, activeConnections: 0, consecutiveFailures: 0, openUntil: null }
     ]);
     expect(lb.getTargetStates('/old')).toEqual([]);
+  });
+
+  describe('circuit breaker', () => {
+    const breaker = { failureThreshold: 3, openMs: 30_000 };
+
+    test('opens after consecutive failures and skips the target until openMs', () => {
+      const r = route();
+      const lb = new LoadBalancer([r], undefined, breaker);
+      lb.reportFailure('/api', 'http://a:1');
+      lb.reportFailure('/api', 'http://a:1');
+      expect(new Set([1, 2].map(() => lb.selectTarget(r)))).not.toEqual(new Set(['http://a:1']));
+      lb.reportFailure('/api', 'http://a:1');
+      // Breaker open: a:1 is out, also marked unhealthy.
+      expect(lb.getTargetStates('/api')[0]).toMatchObject({ isHealthy: false, consecutiveFailures: 3 });
+      expect(new Set([1, 2, 3].map(() => lb.selectTarget(r)))).toEqual(new Set(['http://b:2', 'http://c:3']));
+    });
+
+    test('opens even without a healthCheckPath and recovers after cooldown', () => {
+      jest.useFakeTimers();
+      try {
+        const r = route({ targets: ['http://a:1'] });
+        const lb = new LoadBalancer([r], undefined, breaker);
+        for (let i = 0; i < 3; i++) lb.reportFailure('/api', 'http://a:1');
+        expect(lb.selectTarget(r)).toBeNull();
+        // Cooldown elapsed -> half-open trial admits the target again.
+        jest.advanceTimersByTime(breaker.openMs + 1);
+        expect(lb.selectTarget(r)).toBe('http://a:1');
+        // A failing trial reopens the breaker immediately.
+        lb.reportFailure('/api', 'http://a:1');
+        expect(lb.selectTarget(r)).toBeNull();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('5xx responses feed the breaker without a connectivity-markdown', () => {
+      const r = route();
+      const lb = new LoadBalancer([r], undefined, breaker);
+      lb.reportServerError('/api', 'http://a:1');
+      lb.reportServerError('/api', 'http://a:1');
+      // Below threshold: still healthy, streak recorded.
+      expect(lb.getTargetStates('/api')[0]).toMatchObject({ isHealthy: true, consecutiveFailures: 2 });
+      lb.reportServerError('/api', 'http://a:1');
+      expect(lb.getTargetStates('/api')[0].openUntil).not.toBeNull();
+      // A good response closes the breaker and clears the streak.
+      lb.reportSuccess('/api', 'http://a:1');
+      expect(lb.getTargetStates('/api')[0]).toMatchObject({ isHealthy: true, consecutiveFailures: 0, openUntil: null });
+    });
   });
 
   test('removing healthCheckPath puts previously failed targets back in rotation', () => {

@@ -119,7 +119,7 @@ export class ProxyServer {
     this.metrics = metrics;
     this.firewall = new FirewallEngine(config.firewall);
     this.rateLimiter = new RateLimiterEngine(config.rateLimiter);
-    this.loadBalancer = new LoadBalancer(config.routes, config.healthCheck);
+    this.loadBalancer = new LoadBalancer(config.routes, config.healthCheck, config.circuitBreaker);
     this.upstreamAgent = ProxyServer.buildAgent(config, false);
     this.upstreamTlsAgent = ProxyServer.buildAgent(config, true);
   }
@@ -151,6 +151,7 @@ export class ProxyServer {
     this.rateLimiter.updateGlobalConfig(config.rateLimiter);
     this.loadBalancer.updateRoutes(config.routes);
     this.loadBalancer.updateHealthConfig(config.healthCheck);
+    this.loadBalancer.updateCircuitBreakerConfig(config.circuitBreaker);
     if (config.upstream !== this.config.upstream) {
       const old = this.upstreamAgent;
       const oldTls = this.upstreamTlsAgent;
@@ -309,6 +310,11 @@ export class ProxyServer {
     proxyReq.on('response', (proxyRes) => {
       const status = proxyRes.statusCode || 502;
       this.metrics.recordRequest(status);
+      if (status >= 500) {
+        this.loadBalancer.reportServerError(route.pathPrefix, target);
+      } else {
+        this.loadBalancer.reportSuccess(route.pathPrefix, target);
+      }
       res.writeHead(status, stripHopByHop(proxyRes.headers));
       proxyRes.pipe(res);
       proxyRes.on('end', release);

@@ -65,6 +65,13 @@ export interface HealthCheckConfig {
   timeoutMs: number;
 }
 
+export interface CircuitBreakerConfig {
+  /** Consecutive upstream failures before a target is taken out. */
+  failureThreshold: number;
+  /** How long a failed target stays out before a half-open trial. */
+  openMs: number;
+}
+
 export interface TlsConfig {
   /** PEM certificate chain for the proxy listener. */
   certFile: string;
@@ -116,6 +123,7 @@ export interface GatekeeperConfig {
   firewall: FirewallConfig;
   rateLimiter: RateLimiterConfig;
   healthCheck: HealthCheckConfig;
+  circuitBreaker: CircuitBreakerConfig;
   upstream: UpstreamConfig;
   cluster: ClusterConfig;
 }
@@ -163,6 +171,7 @@ export function defaultConfig(): GatekeeperConfig {
     },
     rateLimiter: { globalWindowMs: 60000, globalMaxRequests: 300, backend: 'memory' },
     healthCheck: { intervalMs: 10000, timeoutMs: 3000 },
+    circuitBreaker: { failureThreshold: 5, openMs: 30000 },
     upstream: { keepAlive: true, maxSockets: 256, maxFreeSockets: 64 },
     cluster: { workers: 1 }
   };
@@ -435,8 +444,14 @@ export function validateConfig(raw: unknown): GatekeeperConfig {
     timeoutMs: int(h, 'timeoutMs', 'healthCheck', defaults.healthCheck.timeoutMs, 10, 60000)
   };
 
+  const cb = section('circuitBreaker');
+  const circuitBreaker: CircuitBreakerConfig = {
+    failureThreshold: int(cb, 'failureThreshold', 'circuitBreaker', defaults.circuitBreaker.failureThreshold, 1, 1000),
+    openMs: int(cb, 'openMs', 'circuitBreaker', defaults.circuitBreaker.openMs, 100, 3600000)
+  };
+
   if (issues.length > 0) throw new ConfigValidationError(issues);
-  return { server, routes, firewall, rateLimiter, healthCheck, upstream, cluster };
+  return { server, routes, firewall, rateLimiter, healthCheck, circuitBreaker, upstream, cluster };
 }
 
 export interface ConfigManagerOptions {
