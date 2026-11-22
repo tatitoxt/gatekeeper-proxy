@@ -9,8 +9,11 @@ export interface BackendTargetState {
   activeConnections: number;
   /** Consecutive upstream failures feeding the circuit breaker. */
   consecutiveFailures: number;
-  /** Epoch ms until which the breaker keeps this target out; null when closed. */
+  /** Epoch ms until which the breaker keeps this target out; null when closed.
+   *  Set to MAX_SAFE_INTEGER while a single half-open trial request is in flight. */
   openUntil: number | null;
+  /** True while the post-cooldown trial request is in flight. */
+  halfOpen: boolean;
 }
 
 interface RouteState {
@@ -73,7 +76,7 @@ export class LoadBalancer {
       const existing = this.routes.get(route.pathPrefix);
       const targets = route.targets.map((url) => {
         const found = existing?.targets.find((t) => t.url === url);
-        if (!found) return { url, isHealthy: true, activeConnections: 0, consecutiveFailures: 0, openUntil: null };
+        if (!found) return { url, isHealthy: true, activeConnections: 0, consecutiveFailures: 0, openUntil: null, halfOpen: false };
         // Without health checks nothing would ever mark a target healthy again.
         if (!route.healthCheckPath) found.isHealthy = true;
         return found;
@@ -89,10 +92,13 @@ export class LoadBalancer {
     if (!state) return null;
     const now = Date.now();
     for (const t of state.targets) {
-      // Breaker cooldown elapsed: let one request through as a half-open trial.
+      // Breaker cooldown elapsed: the next request becomes the single half-open
+      // trial. MAX_SAFE_INTEGER keeps everyone else out until it resolves.
       if (t.openUntil !== null && t.openUntil <= now) {
-        t.openUntil = null;
+        t.openUntil = Number.MAX_SAFE_INTEGER;
+        t.halfOpen = true;
         if (!t.isHealthy) this.setHealth(route.pathPrefix, t, true);
+        return t.url;
       }
     }
     const healthy = state.targets.filter((t) => t.isHealthy && t.openUntil === null);
@@ -145,7 +151,8 @@ export class LoadBalancer {
 
   private feedBreaker(pathPrefix: string, target: BackendTargetState): void {
     if (target.consecutiveFailures < this.breakerConfig.failureThreshold) return;
-    const opened = target.openUntil === null;
+    const opened = target.openUntil === null || target.halfOpen;
+    target.halfOpen = false;
     target.openUntil = Date.now() + this.breakerConfig.openMs;
     this.setHealth(pathPrefix, target, false);
     if (opened) {
@@ -162,6 +169,7 @@ export class LoadBalancer {
     if (!target) return;
     target.consecutiveFailures = 0;
     target.openUntil = null;
+    target.halfOpen = false;
     if (!target.isHealthy) this.setHealth(pathPrefix, target, true);
   }
 
