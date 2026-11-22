@@ -16,6 +16,13 @@ jobs:
   checks:
     name: Lint, typecheck, unit + integration (Node ${{ matrix.node }})
     runs-on: ubuntu-24.04
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    env:
+      GATEKEEPER_TEST_REDIS_URL: redis://localhost:6379
     strategy:
       fail-fast: false
       matrix:
