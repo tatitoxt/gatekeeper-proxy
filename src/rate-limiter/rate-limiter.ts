@@ -14,7 +14,7 @@ export type { RateLimitResult } from './store.js';
  */
 export class RateLimiterEngine {
   private globalConfig: RateLimiterConfig;
-  private readonly store: RateLimitStore;
+  private store: RateLimitStore;
   private readonly now: () => number;
   private cleanupTimer: NodeJS.Timeout;
 
@@ -33,7 +33,18 @@ export class RateLimiterEngine {
   }
 
   public updateGlobalConfig(globalConfig: RateLimiterConfig): void {
+    // A backend change (memory <-> redis, or a different redisUrl/keyPrefix)
+    // needs a fresh store; swap first so no request is lost to the old one.
+    const backendChanged =
+      globalConfig.backend !== this.globalConfig.backend ||
+      globalConfig.redisUrl !== this.globalConfig.redisUrl ||
+      globalConfig.keyPrefix !== this.globalConfig.keyPrefix;
     this.globalConfig = globalConfig;
+    if (backendChanged) {
+      const old = this.store;
+      this.store = createRateLimitStore(globalConfig);
+      void old.close();
+    }
   }
 
   public async checkRateLimit(

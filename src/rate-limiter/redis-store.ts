@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { createClient, type RedisClientType } from 'redis';
 import { logger } from '../utils/logger.js';
 import type { RateLimitResult, RateLimitStore, RateLimitWindow } from './store.js';
@@ -54,20 +55,21 @@ redis.call('PEXPIRE', globalKey, globalWindow + 1000)
 
 local gRemaining = globalMax - gCount - 1
 if routeKey ~= '' and rRemaining < gRemaining then
-  return {1, 'route', routeMax, rRemaining, 0}
+  return {1, 'route', routeMax, rRemaining, reset_ms(routeKey, routeWindow)}
 end
-return {1, 'global', globalMax, gRemaining, 0}
+return {1, 'global', globalMax, gRemaining, reset_ms(globalKey, globalWindow)}
 `;
 
 /**
  * Redis-backed store (sorted sets + Lua, one EVAL per check) so multiple
- * Gatekeeper instances share the same rate-limit budget. Members are
- * `now:seq` to keep hits unique within a millisecond.
+ * Gatekeeper instances share the same rate-limit budget. Members carry a UUID
+ * so two instances cannot collide on the same millisecond + sequence number.
  */
 export class RedisRateLimitStore implements RateLimitStore {
   private readonly client: RedisClientType;
   private readonly prefix: string;
-  private seq = 0;
+  /** Upper bound for one check: a down Redis must degrade, not stall requests. */
+  private readonly deadlineMs = 2000;
 
   constructor(url: string, keyPrefix = 'gk:rl:') {
     this.prefix = keyPrefix;
@@ -87,18 +89,25 @@ export class RedisRateLimitStore implements RateLimitStore {
   ): Promise<RateLimitResult> {
     const routeKey = route ? `${this.prefix}r:${route.key}:${clientIp}` : '';
     const globalKey = `${this.prefix}g:${clientIp}`;
-    const member = `${now}:${this.seq++}`;
-    const raw = (await this.client.eval(CHECK_LUA, {
-      keys: [routeKey, globalKey],
-      arguments: [
-        String(now),
-        member,
-        String(route?.windowMs ?? 0),
-        String(route?.maxRequests ?? 0),
-        String(global.windowMs),
-        String(global.maxRequests)
-      ]
-    })) as [number, string, number, number, number];
+    const member = `${now}:${randomUUID()}`;
+    const raw = (await this.withDeadline(
+      this.client.eval(CHECK_LUA, {
+        keys: [routeKey, globalKey],
+        arguments: [
+          String(now),
+          member,
+          String(route?.windowMs ?? 0),
+          String(route?.maxRequests ?? 0),
+          String(global.windowMs),
+          String(global.maxRequests)
+        ]
+      })
+    )) as [number, string, number, number, number] | null;
+    if (raw === null) {
+      // Redis unreachable or slower than the deadline: fail open and warn.
+      logger.warn({ clientIp }, 'Rate-limit store unavailable; request allowed without quota check');
+      return { allowed: true, scope: 'global', limit: global.maxRequests, remaining: global.maxRequests, resetMs: 0 };
+    }
     return {
       allowed: raw[0] === 1,
       scope: raw[1] as RateLimitResult['scope'],
@@ -106,6 +115,25 @@ export class RedisRateLimitStore implements RateLimitStore {
       remaining: raw[3],
       resetMs: raw[4]
     };
+  }
+
+  /** A Redis outage fails the check open after `deadlineMs` instead of
+   *  hanging the request pipeline. */
+  private async withDeadline<T>(pending: Promise<T>): Promise<T | null> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        pending,
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), this.deadlineMs);
+          timer.unref();
+        })
+      ]);
+    } catch {
+      return null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /** Keys expire by TTL; nothing to sweep. */
@@ -124,9 +152,24 @@ export class RedisRateLimitStore implements RateLimitStore {
 
   public async close(): Promise<void> {
     try {
+      // quit() waits for the connection when the client never connected;
+      // bound it so a dead Redis cannot hang shutdown.
+      const timer = setTimeout(() => {
+        try {
+          this.client.destroy();
+        } catch {
+          /* already destroyed */
+        }
+      }, 1000);
+      timer.unref();
       await this.client.quit();
+      clearTimeout(timer);
     } catch {
-      this.client.destroy();
+      try {
+        this.client.destroy();
+      } catch {
+        /* already destroyed */
+      }
     }
   }
 }
