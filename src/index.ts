@@ -27,6 +27,12 @@ async function bootstrap(): Promise<void> {
     await adminServer.start();
     logger.info({ config: configManager.getPath() }, 'Gatekeeper ready');
   } else {
+    // Workers report counters to the primary so the dashboard and Prometheus
+    // endpoint reflect real traffic; deltas are merged there.
+    const reporter = setInterval(() => {
+      if (process.connected) process.send?.({ type: 'gk:metrics', summary: metrics.getSummary() });
+    }, 2000);
+    reporter.unref();
     logger.info({ worker: process.pid }, 'Gatekeeper worker ready');
   }
 
@@ -52,6 +58,13 @@ async function bootstrap(): Promise<void> {
  */
 function runPrimary(configManager: ConfigManager, workers: number): void {
   const metrics = new MetricsCollector();
+  const lastSummaries = new Map<number, ReturnType<MetricsCollector['getSummary']>>();
+  cluster.on('message', (worker, msg: { type?: string; summary?: ReturnType<MetricsCollector['getSummary']> }) => {
+    if (msg?.type === 'gk:metrics' && msg.summary) {
+      metrics.mergeWorkerSummary(lastSummaries.get(worker.id), msg.summary);
+      lastSummaries.set(worker.id, msg.summary);
+    }
+  });
   const adminServer = new AdminServer(configManager, metrics, {
     token: process.env.GATEKEEPER_ADMIN_TOKEN || undefined
   });
@@ -70,8 +83,18 @@ function runPrimary(configManager: ConfigManager, workers: number): void {
     process.exit(1);
   });
 
+  // Respawning forever when the proxy port is permanently busy would look like
+  // a healthy gateway that never serves traffic: give up after rapid crashes.
+  let respawnedAt: number[] = [];
   cluster.on('exit', (worker, code) => {
+    lastSummaries.delete(worker.id);
     if (shuttingDown) return;
+    respawnedAt.push(Date.now());
+    respawnedAt = respawnedAt.filter((t) => Date.now() - t < 30_000);
+    if (respawnedAt.length > 5) {
+      logger.fatal('Proxy workers keep failing (is the port already in use?); giving up');
+      process.exit(1);
+    }
     logger.warn({ worker: worker.process.pid, code }, 'Proxy worker exited; respawning');
     cluster.fork();
   });
@@ -82,7 +105,17 @@ function runPrimary(configManager: ConfigManager, workers: number): void {
     logger.info({ signal }, 'Shutting down Gatekeeper primary');
     configManager.close();
     for (const w of Object.values(cluster.workers ?? {})) w?.kill('SIGTERM');
-    void adminServer.stop().then(() => process.exit(0));
+    // Wait for workers to drain (each runs proxyServer.stop()) before exiting:
+    // disconnecting early would interrupt their in-flight requests.
+    const drained = new Promise<void>((resolve) => {
+      const alive = () => Object.keys(cluster.workers ?? {}).length;
+      if (alive() === 0) return resolve();
+      cluster.on('exit', () => {
+        if (alive() === 0) resolve();
+      });
+      setTimeout(resolve, 8_000).unref();
+    });
+    void Promise.all([adminServer.stop(), drained]).then(() => process.exit(0));
     setTimeout(() => process.exit(0), 10_000).unref();
   };
 

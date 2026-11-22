@@ -84,6 +84,36 @@ export class MetricsCollector {
     return lines.join('\n') + '\n';
   }
 
+  /** Counters and security events reported by cluster workers. `seenIds` is
+   *  used directly for the lock-free merge and stays bounded with the ring. */
+  private readonly seenEventIds = new Set<string>();
+
+  public mergeWorkerSummary(
+    prev: ReturnType<MetricsCollector['getSummary']> | undefined,
+    next: ReturnType<MetricsCollector['getSummary']>
+  ): void {
+    {
+      const dReq = Math.max(0, next.totalRequests - (prev?.totalRequests ?? 0));
+      this.totalRequests += dReq;
+      for (const [status, count] of Object.entries(next.statusCounts)) {
+        const d = Math.max(0, count - (prev?.statusCounts[Number(status)] || 0));
+        this.statusCounts[Number(status)] = (this.statusCounts[Number(status)] || 0) + d;
+      }
+      this.wafBlocks += Math.max(0, next.wafBlocks - (prev?.wafBlocks ?? 0));
+      this.rateLimitHits += Math.max(0, next.rateLimitHits - (prev?.rateLimitHits ?? 0));
+    }
+    for (const event of [...next.recentEvents].reverse()) {
+      if (this.seenEventIds.has(event.id)) continue;
+      this.seenEventIds.add(event.id);
+      this.recentEvents.unshift(event);
+    }
+    if (this.recentEvents.length > this.maxEvents) this.recentEvents.length = this.maxEvents;
+    if (this.seenEventIds.size > 10_000) {
+      const keep = new Set(this.recentEvents.map((e) => e.id));
+      for (const id of this.seenEventIds) if (!keep.has(id)) this.seenEventIds.delete(id);
+    }
+  }
+
   private addEvent(type: SecurityEvent['type'], ip: string, path: string, method: string, reason: string): void {
     this.recentEvents.unshift({
       id: randomUUID(),
