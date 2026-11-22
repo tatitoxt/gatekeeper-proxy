@@ -181,8 +181,13 @@ export class ProxyServer {
       const oldTls = this.upstreamTlsAgent;
       this.upstreamAgent = ProxyServer.buildAgent(config, false);
       this.upstreamTlsAgent = ProxyServer.buildAgent(config, true);
-      old.destroy();
-      oldTls.destroy();
+      // Agent.destroy() closes active sockets mid-request: defer teardown
+      // past the route timeout so in-flight requests finish first.
+      const retire = setTimeout(() => {
+        old.destroy();
+        oldTls.destroy();
+      }, this.config.server.timeoutMs);
+      retire.unref();
     }
     // Only drop h2 sessions for origins no route uses anymore; surviving
     // sessions keep multiplexing so a reload does not abort in-flight streams.
@@ -400,8 +405,10 @@ export class ProxyServer {
         logger.error({ target, url: req.url }, 'Upstream request timed out');
       } else {
         logger.error({ err: err.message, target, url: req.url }, 'Upstream request failed');
-        this.loadBalancer.reportFailure(route.pathPrefix, target);
       }
+      // A timeout feeds the breaker too: a timed-out half-open trial must
+      // reopen it or the target would wait out MAX_SAFE_INTEGER forever.
+      this.loadBalancer.reportFailure(route.pathPrefix, target);
       if (res.headersSent) {
         res.destroy();
         return;
@@ -506,8 +513,8 @@ export class ProxyServer {
         logger.error({ target, url: req.url }, 'Upstream request timed out');
       } else {
         logger.error({ err: err.message, target, url: req.url }, 'HTTP/2 upstream request failed');
-        this.loadBalancer.reportFailure(route.pathPrefix, target);
       }
+      this.loadBalancer.reportFailure(route.pathPrefix, target);
       if (res.headersSent) {
         res.destroy();
         return;
@@ -651,12 +658,13 @@ export class ProxyServer {
       // proxyRes already decoded framing (e.g. chunked): forwarding its raw
       // headers verbatim would describe bytes we never send. Drop transfer
       // framing and end the tunnel when the response ends.
-      const filtered = proxyRes.rawHeaders.filter(
-        (v, i) => i % 2 === 0 && !['transfer-encoding', 'connection', 'keep-alive'].includes(v.toLowerCase())
-      );
       const lines = [`HTTP/1.1 ${proxyRes.statusCode} ${proxyRes.statusMessage}`];
-      for (let i = 0; i < filtered.length; i += 2) {
-        lines.push(`${filtered[i]}: ${filtered[i + 1]}`);
+      // rawHeaders is [name, value, name, value, ...]: pair them and only
+      // drop hop-by-hop entries, so values keep their own names.
+      for (let i = 0; i + 1 < proxyRes.rawHeaders.length; i += 2) {
+        const name = proxyRes.rawHeaders[i];
+        if (['transfer-encoding', 'connection', 'keep-alive'].includes(name.toLowerCase())) continue;
+        lines.push(`${name}: ${proxyRes.rawHeaders[i + 1]}`);
       }
       lines.push('Connection: close');
       socket.write(`${lines.join('\r\n')}\r\n\r\n`);
