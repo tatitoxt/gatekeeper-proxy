@@ -1,20 +1,32 @@
+import { randomUUID } from 'node:crypto';
+
 export interface SecurityEvent {
   id: string;
   timestamp: string;
+  type: 'firewall' | 'rate-limit';
   ip: string;
   path: string;
   method: string;
   reason: string;
 }
 
+const MAX_EVENT_PATH_LENGTH = 512;
+
+/** In-process counters and a bounded ring of recent security events. Reset on restart. */
 export class MetricsCollector {
   private totalRequests = 0;
   private statusCounts: Record<number, number> = {};
   private wafBlocks = 0;
   private rateLimitHits = 0;
   private recentEvents: SecurityEvent[] = [];
-  private maxEvents = 100;
-  private startTime = Date.now();
+  private readonly startTime: number;
+
+  constructor(
+    private readonly maxEvents = 100,
+    private readonly now: () => number = Date.now
+  ) {
+    this.startTime = now();
+  }
 
   public recordRequest(statusCode: number): void {
     this.totalRequests++;
@@ -23,47 +35,95 @@ export class MetricsCollector {
 
   public recordWafBlock(ip: string, path: string, method: string, reason: string): void {
     this.wafBlocks++;
-    this.addEvent({
-      id: Math.random().toString(36).substring(2, 9),
-      timestamp: new Date().toISOString(),
-      ip,
-      path,
-      method,
-      reason: `WAF: ${reason}`
-    });
+    this.addEvent('firewall', ip, path, method, reason);
   }
 
   public recordRateLimitHit(ip: string, path: string, method: string): void {
     this.rateLimitHits++;
-    this.addEvent({
-      id: Math.random().toString(36).substring(2, 9),
-      timestamp: new Date().toISOString(),
-      ip,
-      path,
-      method,
-      reason: 'Rate Limit Exceeded (429)'
-    });
+    this.addEvent('rate-limit', ip, path, method, 'Rate Limit Exceeded (429)');
   }
 
   public getSummary() {
-    const uptimeSeconds = Math.floor((Date.now() - this.startTime) / 1000);
+    const uptimeSeconds = Math.floor((this.now() - this.startTime) / 1000);
     return {
       uptimeSeconds,
       totalRequests: this.totalRequests,
-      statusCounts: this.statusCounts,
+      statusCounts: { ...this.statusCounts },
       wafBlocks: this.wafBlocks,
       rateLimitHits: this.rateLimitHits,
-      requestsPerSecond: uptimeSeconds > 0 ? (this.totalRequests / uptimeSeconds).toFixed(2) : '0.00',
-      recentEvents: this.recentEvents
+      averageRequestsPerSecond: uptimeSeconds > 0 ? Number((this.totalRequests / uptimeSeconds).toFixed(2)) : 0,
+      recentEvents: [...this.recentEvents]
     };
   }
 
-  private addEvent(event: SecurityEvent): void {
-    this.recentEvents.unshift(event);
-    if (this.recentEvents.length > this.maxEvents) {
-      this.recentEvents.pop();
+  /** Prometheus text exposition format (0.0.4), for `GET /metrics`.
+   *  Counters reset on restart, like the JSON summary. */
+  public toPrometheus(): string {
+    const uptimeSeconds = Math.floor((this.now() - this.startTime) / 1000);
+    const lines: string[] = [
+      '# HELP gatekeeper_uptime_seconds Seconds since the proxy process started.',
+      '# TYPE gatekeeper_uptime_seconds gauge',
+      `gatekeeper_uptime_seconds ${uptimeSeconds}`,
+      '# HELP gatekeeper_requests_total Total proxied requests.',
+      '# TYPE gatekeeper_requests_total counter',
+      `gatekeeper_requests_total ${this.totalRequests}`,
+      '# HELP gatekeeper_responses_total Proxied responses by HTTP status code.',
+      '# TYPE gatekeeper_responses_total counter'
+    ];
+    for (const status of Object.keys(this.statusCounts).sort()) {
+      lines.push(`gatekeeper_responses_total{status="${status}"} ${this.statusCounts[Number(status)]}`);
+    }
+    lines.push(
+      '# HELP gatekeeper_waf_blocks_total Requests blocked by firewall rules.',
+      '# TYPE gatekeeper_waf_blocks_total counter',
+      `gatekeeper_waf_blocks_total ${this.wafBlocks}`,
+      '# HELP gatekeeper_rate_limit_hits_total Requests rejected by the rate limiter (429).',
+      '# TYPE gatekeeper_rate_limit_hits_total counter',
+      `gatekeeper_rate_limit_hits_total ${this.rateLimitHits}`
+    );
+    return lines.join('\n') + '\n';
+  }
+
+  /** Counters and security events reported by cluster workers. `seenIds` is
+   *  used directly for the lock-free merge and stays bounded with the ring. */
+  private readonly seenEventIds = new Set<string>();
+
+  public mergeWorkerSummary(
+    prev: ReturnType<MetricsCollector['getSummary']> | undefined,
+    next: ReturnType<MetricsCollector['getSummary']>
+  ): void {
+    {
+      const dReq = Math.max(0, next.totalRequests - (prev?.totalRequests ?? 0));
+      this.totalRequests += dReq;
+      for (const [status, count] of Object.entries(next.statusCounts)) {
+        const d = Math.max(0, count - (prev?.statusCounts[Number(status)] || 0));
+        this.statusCounts[Number(status)] = (this.statusCounts[Number(status)] || 0) + d;
+      }
+      this.wafBlocks += Math.max(0, next.wafBlocks - (prev?.wafBlocks ?? 0));
+      this.rateLimitHits += Math.max(0, next.rateLimitHits - (prev?.rateLimitHits ?? 0));
+    }
+    for (const event of [...next.recentEvents].reverse()) {
+      if (this.seenEventIds.has(event.id)) continue;
+      this.seenEventIds.add(event.id);
+      this.recentEvents.unshift(event);
+    }
+    if (this.recentEvents.length > this.maxEvents) this.recentEvents.length = this.maxEvents;
+    if (this.seenEventIds.size > 10_000) {
+      const keep = new Set(this.recentEvents.map((e) => e.id));
+      for (const id of this.seenEventIds) if (!keep.has(id)) this.seenEventIds.delete(id);
     }
   }
-}
 
-export const metrics = new MetricsCollector();
+  private addEvent(type: SecurityEvent['type'], ip: string, path: string, method: string, reason: string): void {
+    this.recentEvents.unshift({
+      id: randomUUID(),
+      timestamp: new Date(this.now()).toISOString(),
+      type,
+      ip,
+      path: path.length > MAX_EVENT_PATH_LENGTH ? path.slice(0, MAX_EVENT_PATH_LENGTH) + '…' : path,
+      method,
+      reason
+    });
+    if (this.recentEvents.length > this.maxEvents) this.recentEvents.length = this.maxEvents;
+  }
+}

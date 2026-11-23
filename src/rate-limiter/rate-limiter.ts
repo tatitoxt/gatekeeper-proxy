@@ -1,106 +1,83 @@
-import { RateLimiterConfig } from '../config/config.js';
+import { RateLimiterConfig, RouteRateLimit } from '../config/config.js';
+import { createRateLimitStore, type RateLimitStore } from './store-factory.js';
+import type { RateLimitResult } from './store.js';
 
-interface RequestLog {
-  timestamps: number[];
-}
+export type { RateLimitResult } from './store.js';
 
-export interface RateLimitResult {
-  allowed: boolean;
-  limit: number;
-  remaining: number;
-  resetMs: number;
-}
-
+/**
+ * Sliding-window rate limiter, keyed by client IP. A request is counted only if
+ * it passes both the route limit (when configured) and the global per-IP limit,
+ * so rejected requests never consume quota.
+ *
+ * The storage backend is pluggable: in-memory (default, per-process) or Redis
+ * (`rateLimiter.backend: 'redis'`), which shares the budget across instances.
+ */
 export class RateLimiterEngine {
   private globalConfig: RateLimiterConfig;
-  private ipStore: Map<string, RequestLog> = new Map();
-  private routeStores: Map<string, Map<string, RequestLog>> = new Map();
+  private store: RateLimitStore;
+  private readonly now: () => number;
+  private cleanupTimer: NodeJS.Timeout;
 
-  constructor(globalConfig: RateLimiterConfig) {
+  constructor(
+    globalConfig: RateLimiterConfig,
+    now: () => number = Date.now,
+    store: RateLimitStore = createRateLimitStore(globalConfig)
+  ) {
     this.globalConfig = globalConfig;
-    // Periodic cleanup of stale entries every 60 seconds
-    const cleanupTimer = setInterval(() => this.cleanup(), 60000);
-    if (cleanupTimer.unref) cleanupTimer.unref();
+    this.now = now;
+    this.store = store;
+    this.cleanupTimer = setInterval(() => {
+      void this.sweep();
+    }, 60000);
+    this.cleanupTimer.unref();
   }
 
   public updateGlobalConfig(globalConfig: RateLimiterConfig): void {
+    // A backend change (memory <-> redis, or a different redisUrl/keyPrefix)
+    // needs a fresh store; swap first so no request is lost to the old one.
+    const backendChanged =
+      globalConfig.backend !== this.globalConfig.backend ||
+      globalConfig.redisUrl !== this.globalConfig.redisUrl ||
+      globalConfig.keyPrefix !== this.globalConfig.keyPrefix;
     this.globalConfig = globalConfig;
+    if (backendChanged) {
+      const old = this.store;
+      this.store = createRateLimitStore(globalConfig);
+      void old.close();
+    }
   }
 
-  public checkRateLimit(
+  public async checkRateLimit(
     clientIp: string,
     routePrefix?: string,
-    routeLimit?: { windowMs: number; maxRequests: number }
-  ): RateLimitResult {
-    const now = Date.now();
-
-    // 1. Check Route-Specific Rate Limit
-    if (routePrefix && routeLimit) {
-      if (!this.routeStores.has(routePrefix)) {
-        this.routeStores.set(routePrefix, new Map());
-      }
-      const store = this.routeStores.get(routePrefix)!;
-      const res = this.evaluateWindow(store, clientIp, now, routeLimit.windowMs, routeLimit.maxRequests);
-      if (!res.allowed) return res;
-    }
-
-    // 2. Check Global IP Rate Limit
-    return this.evaluateWindow(
-      this.ipStore,
+    routeLimit?: RouteRateLimit
+  ): Promise<RateLimitResult> {
+    const route =
+      routePrefix !== undefined && routeLimit
+        ? { key: routePrefix, windowMs: routeLimit.windowMs, maxRequests: routeLimit.maxRequests }
+        : null;
+    return this.store.check(
       clientIp,
-      now,
-      this.globalConfig.globalWindowMs,
-      this.globalConfig.globalMaxRequests
+      route,
+      {
+        windowMs: this.globalConfig.globalWindowMs,
+        maxRequests: this.globalConfig.globalMaxRequests
+      },
+      this.now()
     );
   }
 
-  private evaluateWindow(
-    store: Map<string, RequestLog>,
-    key: string,
-    now: number,
-    windowMs: number,
-    maxRequests: number
-  ): RateLimitResult {
-    let record = store.get(key);
-    if (!record) {
-      record = { timestamps: [] };
-      store.set(key, record);
-    }
-
-    const windowStart = now - windowMs;
-    // Filter timestamps within current sliding window
-    record.timestamps = record.timestamps.filter((ts) => ts > windowStart);
-
-    const count = record.timestamps.length;
-    const remaining = Math.max(0, maxRequests - count - 1);
-    const oldestTs = record.timestamps[0] || now;
-    const resetMs = Math.max(0, oldestTs + windowMs - now);
-
-    if (count >= maxRequests) {
-      return {
-        allowed: false,
-        limit: maxRequests,
-        remaining: 0,
-        resetMs
-      };
-    }
-
-    record.timestamps.push(now);
-
-    return {
-      allowed: true,
-      limit: maxRequests,
-      remaining,
-      resetMs
-    };
+  /** Drops records whose newest request has left its window. Returns the number removed. */
+  public async sweep(): Promise<number> {
+    return this.store.sweep(this.now());
   }
 
-  private cleanup(): void {
-    const now = Date.now();
-    for (const [ip, record] of this.ipStore.entries()) {
-      if (record.timestamps.length === 0 || record.timestamps[record.timestamps.length - 1] < now - 3600000) {
-        this.ipStore.delete(ip);
-      }
-    }
+  public async trackedKeys(): Promise<number> {
+    return this.store.trackedKeys();
+  }
+
+  public async close(): Promise<void> {
+    clearInterval(this.cleanupTimer);
+    await this.store.close();
   }
 }
